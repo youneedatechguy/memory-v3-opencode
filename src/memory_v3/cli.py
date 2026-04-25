@@ -112,8 +112,95 @@ def cmd_topics(args):
     _pp(result)
 
 
+def _cmd_reembed(args):
+    """Drop and rebuild memory_vec with the current embedding provider."""
+    from .config import get_config
+    from .providers import get_embedder
+
+    cfg = get_config()
+    embedder = get_embedder()
+
+    print(f"\n[memory-v3] REEMBED WARNING")
+    print(f"  This will drop and recreate memory_vec (dim={embedder.dim})")
+    print(f"  and re-embed ALL memories using provider '{cfg.embed_provider}'")
+    print(f"  model='{embedder.model}'.")
+    print(f"")
+    print(f"  Depending on your provider and memory count, this may incur API costs.")
+    print(f"  Check your provider's pricing before continuing.")
+    print(f"")
+    confirm = input("  Type 'yes' to continue: ").strip().lower()
+    if confirm != "yes":
+        print("Aborted.")
+        return
+
+    from .db import init_db
+    conn = init_db()
+
+    try:
+        # 1. Flush the embedding cache
+        import shutil
+        import os
+        cache_dir = cfg.cache_dir if cfg.cache_dir else None
+        if cache_dir and os.path.isdir(cache_dir):
+            shutil.rmtree(cache_dir)
+            os.makedirs(cache_dir, exist_ok=True)
+            print(f"  Cache cleared: {cache_dir}")
+
+        # 2. Drop and recreate memory_vec
+        conn.execute("DROP TABLE IF EXISTS memory_vec")
+        conn.execute(
+            f"CREATE VIRTUAL TABLE memory_vec USING vec0(embedding float[{embedder.dim}])"
+        )
+        conn.commit()
+        print(f"  memory_vec recreated with dim={embedder.dim}")
+
+        # 3. Re-embed all memories in batches
+        rows = conn.execute(
+            "SELECT id, content FROM memories ORDER BY id"
+        ).fetchall()
+        total = len(rows)
+        print(f"  Re-embedding {total} memories...")
+        batch_size = 50
+        import json as _json
+        for i in range(0, total, batch_size):
+            batch = rows[i : i + batch_size]
+            ids = [r[0] for r in batch]
+            texts = [r[1] for r in batch]
+            try:
+                vectors = embedder.embed_batch(texts)
+            except Exception:
+                vectors = [embedder.embed(t) for t in texts]
+            for mem_id, vec in zip(ids, vectors):
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_vec(rowid, embedding) VALUES (?, ?)",
+                    (mem_id, _json.dumps(vec)),
+                )
+            conn.commit()
+            done = min(i + batch_size, total)
+            print(f"  {done}/{total} done")
+
+        # 4. Recompute centroids (non-fatal if it fails)
+        try:
+            from .graphs import GraphManager
+            gm = GraphManager()
+            gm.recompute_centroids(conn)
+            print("  Centroids recomputed.")
+        except Exception as e:
+            print(f"  Centroid recomputation skipped: {e}")
+
+        print(
+            f"\n  Done. All {total} memories re-embedded with"
+            f" {cfg.embed_provider}:{embedder.model}"
+        )
+    finally:
+        conn.close()
+
+
 def cmd_reindex(args):
     """Re-index the vault."""
+    if hasattr(args, "reembed") and args.reembed:
+        _cmd_reembed(args)
+        return
     from .server import reindex
     result = reindex(force=args.force)
     _pp(result)
@@ -321,6 +408,11 @@ def build_parser() -> argparse.ArgumentParser:
     # --- reindex ---
     p = sub.add_parser("reindex", help="Re-index the vault")
     p.add_argument("--force", action="store_true", help="Force full re-index")
+    p.add_argument(
+        "--reembed",
+        action="store_true",
+        help="Drop and rebuild memory_vec with the current embedding provider",
+    )
 
     # --- integrity ---
     sub.add_parser("integrity", help="Check vault integrity and staleness")
