@@ -16,12 +16,17 @@ class OpenAIEmbedder:
     def __init__(self, model: str | None = None, dim: int | None = None):
         self.model = model or os.environ.get("MEMORY_V3_EMBED_MODEL", "text-embedding-3-small")
         self.dim = dim or int(os.environ.get("MEMORY_V3_EMBED_DIM", "1536"))
-        self._client = openai.OpenAI()
+        self._client = None
+
+    def _get_client(self):
+        if self._client is None:
+            self._client = openai.OpenAI()
+        return self._client
 
     def embed(self, text: str) -> list[float]:
-        resp = self._client.embeddings.create(model=self.model, input=text)
+        resp = self._get_client().embeddings.create(model=self.model, input=text)
         return resp.data[0].embedding
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
-        resp = self._client.embeddings.create(model=self.model, input=texts)
+        resp = self._get_client().embeddings.create(model=self.model, input=texts)
         return [item.embedding for item in resp.data]

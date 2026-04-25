@@ -1,6 +1,13 @@
 import os
 import pytest
 
+sentence_transformers_available = False
+try:
+    import sentence_transformers
+    sentence_transformers_available = True
+except ImportError:
+    pass
+
 
 def test_get_embedder_defaults_to_ollama(monkeypatch):
     monkeypatch.delenv("MEMORY_V3_EMBED_PROVIDER", raising=False)
@@ -16,6 +23,7 @@ def test_get_embedder_openai(monkeypatch):
     assert isinstance(get_embedder(), OpenAIEmbedder)
 
 
+@pytest.mark.skipif(not sentence_transformers_available, reason="sentence-transformers not installed")
 def test_get_embedder_local(monkeypatch):
     monkeypatch.setenv("MEMORY_V3_EMBED_PROVIDER", "local")
     from memory_v3.providers import get_embedder
