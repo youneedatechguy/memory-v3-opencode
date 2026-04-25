@@ -1,25 +1,3 @@
-# memory-v3-opencode — OpenCode Session Protocol
-
-## Session Startup
-
-At the start of each session:
-1. Call `agent_sync("opencode")` to catch up on memory changes from other agents
-2. Call `search("current project context")` to recall relevant memories
-3. Call `list_recent` (last 24h) if returning to in-progress work
-
-## Session End
-
-When switching tasks or ending a session:
-1. Call `extract_from_conversation` with a summary of what was decided/built
-
-## Provider Config Reference
-
-- Embeddings: OpenAI `text-embedding-3-small`, dim=1536
-- LLM: OpenAI `gpt-4o-mini` (fast, cheap, handles extraction/compaction)
-- Agent LLM: Anthropic Claude Sonnet (full reasoning, tool orchestration — handled by OpenCode itself)
-
----
-
 # memory-v3-opencode
 
 Fork of [Haustorium12/memory-v3](https://github.com/Haustorium12/memory-v3). Goal: replace the hard Ollama dependency with a pluggable provider system supporting OpenAI-compatible embeddings, Anthropic/OpenAI LLMs, and local sentence-transformers. Target runtime: [OpenCode](https://opencode.ai) (MCP stdio/SSE).
