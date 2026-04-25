@@ -26,7 +26,7 @@ class LocalEmbedder:
             )
         self._model = SentenceTransformer(self.model_name)
 
-        actual_dim = self._model.get_sentence_embedding_dimension()
+        actual_dim = self._model.get_embedding_dimension()
         if actual_dim != self.dim:
             print(
                 f"WARNING: LocalEmbedder loaded '{self.model_name}' which outputs dim={actual_dim}, "
