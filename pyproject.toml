@@ -16,14 +16,28 @@ dependencies = [
     "fastmcp>=2.0",
     "numpy>=1.24",
     "networkx>=3.0",
-    "ollama>=0.4",
     "sqlite-vec>=0.1",
 ]
 
 [project.optional-dependencies]
+ollama = ["ollama>=0.4"]
+openai = ["openai>=1.0"]
+anthropic = ["anthropic>=0.40"]
+local = ["sentence-transformers>=2.2"]
 graph = ["python-igraph>=0.11", "leidenalg>=0.10", "pyvis>=0.3"]
 dev = ["pytest>=8.0", "pytest-cov", "ruff"]
-all = ["memory-v3[graph,dev]"]
+all = [
+    "ollama>=0.4",
+    "openai>=1.0",
+    "anthropic>=0.40",
+    "sentence-transformers>=2.2",
+    "python-igraph>=0.11",
+    "leidenalg>=0.10",
+    "pyvis>=0.3",
+    "pytest>=8.0",
+    "pytest-cov",
+    "ruff",
+]
 
 [project.scripts]
 memory-v3 = "memory_v3.cli:main"
