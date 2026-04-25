@@ -98,6 +98,8 @@ class Config:
     embed_model: str = "nomic-embed-text"
     llm_model: str = "qwen2.5:3b"
     embed_dim: int = 768
+    embed_provider: str = "ollama"   # MEMORY_V3_EMBED_PROVIDER
+    llm_provider: str = "ollama"     # MEMORY_V3_LLM_PROVIDER
 
     # --- ACT-R cognitive architecture constants ---
     actr_decay_d: float = 0.5
@@ -225,6 +227,8 @@ def _build_config() -> Config:
         embed_model=_env("EMBED_MODEL", "nomic-embed-text"),
         llm_model=_env("LLM_MODEL", "qwen2.5:3b"),
         embed_dim=_env_int("EMBED_DIM", 768),
+        embed_provider=_env("EMBED_PROVIDER", "ollama"),
+        llm_provider=_env("LLM_PROVIDER", "ollama"),
 
         # ACT-R
         actr_decay_d=_env_float("ACTR_DECAY_D", 0.5),
