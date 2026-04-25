@@ -23,9 +23,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-import ollama
-
 from ..config import Config, get_config
+from ..providers import get_llm
 
 # ---------------------------------------------------------------------------
 # Protected content patterns
@@ -133,7 +132,6 @@ def structured_summary(
     Target length is roughly len(text) / max_ratio characters.
     """
     cfg = config or get_config()
-    model = cfg.llm_model
 
     target_len = max(50, int(len(text) / max_ratio))
 
@@ -146,12 +144,7 @@ def structured_summary(
     )
 
     try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1, "num_predict": max(256, target_len * 2)},
-        )
-        summary = response["message"]["content"].strip()
+        summary = get_llm().chat(prompt, max_tokens=2048)
         return summary
     except Exception as e:
         # Fallback: simple truncation preserving sentence boundaries
