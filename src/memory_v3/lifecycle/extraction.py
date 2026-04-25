@@ -19,7 +19,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
-import ollama
 
 from ..config import Config, get_config
 from ..db import add_memory, update_memory, archive_memory, _serialize_f32
@@ -28,6 +27,7 @@ from ..scoring.actr import cosine_similarity
 from ..scoring.hierarchy import classify_governance_layer
 from .sensory import SensoryFilter
 from .action_decider import ActionDecider
+from ..providers import get_llm
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -157,7 +157,6 @@ def extract_facts(
     Returns a list of fact strings.
     """
     cfg = config or get_config()
-    model = cfg.llm_model
 
     # Inject date context if available
     date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -166,12 +165,7 @@ def extract_facts(
         prompt = f"[Context: today is {date_str}]\n\n{prompt}"
 
     try:
-        response = ollama.chat(
-            model=model,
-            messages=[{"role": "user", "content": prompt}],
-            options={"temperature": 0.1, "num_predict": 2048},
-        )
-        content = response["message"]["content"].strip()
+        content = get_llm().chat(prompt, max_tokens=2048)
     except Exception as e:
         return [f"[extraction error: {e}]"]
 
