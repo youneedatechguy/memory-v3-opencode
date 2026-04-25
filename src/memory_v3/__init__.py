@@ -3,21 +3,7 @@
 __version__ = "1.0.0"
 __author__ = "Sean Pembroke"
 
-_embedder = None
-
-
-def get_embedder():
-    """
-    Lazy-load and warm up the embedding function.
-    Returns the embed_text callable for use throughout the system.
-    """
-    global _embedder
-    if _embedder is None:
-        from .embeddings import embed_text
-
-        embed_text("warmup")
-        _embedder = embed_text
-    return _embedder
+from .providers import get_embedder  # noqa: F401  re-export for public API
 
 
 def get_version_info() -> dict:

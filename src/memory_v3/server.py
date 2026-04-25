@@ -138,7 +138,7 @@ def add_memory(
 
     # Generate embedding
     embed_fn = get_embedder()
-    embedding = embed_fn(content)
+    embedding = embed_fn.embed(content)
 
     # Novelty check via cosine against top-5 nearest
     novelty = 1.0
@@ -308,7 +308,7 @@ def update(
     if content is not None:
         try:
             embed_fn = get_embedder()
-            embedding = embed_fn(content)
+            embedding = embed_fn.embed(content)
             from .db import _serialize_f32
             conn.execute("DELETE FROM memory_vec WHERE id = ?", (memory_id,))
             conn.execute(
@@ -372,7 +372,7 @@ def search(query: str, limit: int = 10, content_type: Optional[str] = None) -> s
     cfg = get_config()
 
     embed_fn = get_embedder()
-    query_embedding = embed_fn(query)
+    query_embedding = embed_fn.embed(query)
 
     if cfg.enable_three_stage:
         from .retrieval import search as retrieval_search
@@ -777,7 +777,7 @@ def reindex(force: bool = False) -> str:
 
         # Index the file as a single memory
         try:
-            embedding = embed_fn(content[:2000])  # Cap embedding input
+            embedding = embed_fn.embed(content[:2000])  # Cap embedding input
             ct = detect_content_type(content)
             tags = _extract_tags(content)
             gov = classify_governance_layer(ct, tags=set(tags))
