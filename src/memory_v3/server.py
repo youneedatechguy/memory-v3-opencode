@@ -7,6 +7,8 @@ FastMCP server exposing the next-generation memory system.
 import hashlib
 import json
 import os
+import re
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,36 @@ from fastmcp import FastMCP
 from . import db, embeddings, get_embedder
 from .config import get_config, GOVERNANCE_LAYERS
 from .security import scan_for_credentials
+
+
+def _check_embedding_dim(conn, configured_dim: int) -> None:
+    """Exit with a clear error if DB vector dim differs from configured provider dim."""
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='memory_vec'"
+    ).fetchone()
+    if row is None:
+        return  # table doesn't exist yet — will be created at first write
+    match = re.search(r"float\[(\d+)\]", row[0])
+    if match is None:
+        return  # can't determine dim — don't block startup
+    db_dim = int(match.group(1))
+    if db_dim != configured_dim:
+        print(
+            f"\n[memory-v3] ERROR: Embedding dimension mismatch!\n"
+            f"  DB was created with dim={db_dim}\n"
+            f"  Current provider is configured for dim={configured_dim}\n"
+            f"\n"
+            f"  This usually means you switched embedding providers or models.\n"
+            f"  Mixing dimensions will silently corrupt vector search results.\n"
+            f"\n"
+            f"  To fix: run  memory-v3 reindex --reembed\n"
+            f"  WARNING: --reembed will call your embedding API for every memory.\n"
+            f"  Depending on your provider and memory count, this may incur API costs.\n"
+            f"  Check https://openai.com/pricing (or your provider's pricing) first.\n",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
 
 mcp = FastMCP(
     "memory-v3",
@@ -1115,6 +1147,9 @@ def set_governance_layer(memory_id: int, layer: int) -> str:
 
 def run():
     """Entry point for the MCP server."""
+    cfg = get_config()
+    conn = _get_conn()
+    _check_embedding_dim(conn, cfg.embed_dim)
     mcp.run(show_banner=False)
 
 
