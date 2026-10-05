@@ -259,6 +259,19 @@ def test_binary_files_are_excluded(tmp_path):
     assert not any(p.endswith((".png", ".xlsx", ".pdf")) for p in paths)
 
 
+def test_oversized_sources_are_excluded(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write(vault / "business" / "notes.md")
+    (vault / "business" / "huge.json").write_text("x" * (300 * 1024), encoding="utf-8")
+    cfg = Config(vault_path=str(vault), source_policy_owner="owner-a")
+
+    paths = {record.relative_path for record in build_source_manifest(config=cfg, today=TODAY)}
+
+    assert "business/notes.md" in paths
+    assert "business/huge.json" not in paths
+
+
 def test_source_policy_config_controls_owner_roots_and_stale_threshold(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()

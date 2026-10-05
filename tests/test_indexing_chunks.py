@@ -129,7 +129,7 @@ def test_overlap_is_bounded_and_non_overlap_lines_are_neither_omitted_nor_duplic
     assert non_overlap_lines(chunks) == text.splitlines()
 
 
-def test_hard_max_is_respected_except_single_long_source_line():
+def test_hard_max_is_respected_by_splitting_long_source_lines():
     long_line = "L" * 80 + "\n"
     text = "short-1\nshort-2\n" + long_line + "short-3\n" + "short-4\n"
 
@@ -143,12 +143,8 @@ def test_hard_max_is_respected_except_single_long_source_line():
         overlap_lines=2,
     )
 
-    oversized = [chunk for chunk in chunks if len(chunk.embedding_text) > 80]
-    assert len(oversized) == 1
-    assert oversized[0].body == long_line
-    assert oversized[0].line_start == oversized[0].line_end == 3
-    assert all(len(chunk.embedding_text) <= 80 or chunk.body == long_line for chunk in chunks)
-    assert non_overlap_lines(chunks) == text.splitlines()
+    assert all(len(chunk.embedding_text) <= 80 for chunk in chunks)
+    assert "".join(non_overlap_lines(chunks)) == text.replace("\n", "")
 
 
 def test_embedding_text_hard_max_includes_long_path_and_deep_headings():
@@ -171,7 +167,7 @@ def test_embedding_text_hard_max_includes_long_path_and_deep_headings():
     assert non_overlap_lines(chunks) == text.splitlines()
 
 
-def test_single_line_overflow_is_only_allowed_when_metadata_leaves_no_fit():
+def test_single_long_line_is_split_within_hard_max():
     text = "# Heading\n" + "x" * 80 + "\n"
     chunks = build_source_chunks(
         "owner-a",
@@ -183,13 +179,8 @@ def test_single_line_overflow_is_only_allowed_when_metadata_leaves_no_fit():
         overlap_lines=1,
     )
 
-    oversized = [chunk for chunk in chunks if len(chunk.embedding_text) > 70]
-    assert len(oversized) == 1
-    assert oversized[0].line_start == oversized[0].line_end == 2
-    assert oversized[0].body == "x" * 80 + "\n"
-    assert all(
-        len(chunk.embedding_text) <= 70 or chunk.line_start == chunk.line_end for chunk in chunks
-    )
+    assert all(len(chunk.embedding_text) <= 70 for chunk in chunks)
+    assert "".join(non_overlap_lines(chunks)) == text.replace("\n", "")
 
 
 @pytest.mark.parametrize(
@@ -275,3 +266,13 @@ def test_defaults_are_frozen_for_phase_three_chunking():
     assert DEFAULT_TARGET_CHARS == 3500
     assert DEFAULT_MAX_CHARS == 5000
     assert DEFAULT_OVERLAP_LINES == 3
+
+
+def test_single_oversized_line_is_split_below_max_chars():
+    blob = "x" * (DEFAULT_MAX_CHARS * 4)
+    chunks = build_source_chunks("owner", "business", "business/blob.json", blob)
+
+    assert len(chunks) > 1
+    assert all(len(chunk.embedding_text) <= DEFAULT_MAX_CHARS for chunk in chunks)
+    reconstructed = "".join(non_overlap_lines(chunks))
+    assert reconstructed.replace("\n", "") == blob

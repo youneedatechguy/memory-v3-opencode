@@ -61,6 +61,7 @@ BINARY_SUFFIXES = {
     ".sqlite3",
 }
 LOG_DIR_NAMES = {"log", "logs"}
+MAX_SOURCE_BYTES = 262144
 VENDOR_DIR_NAMES = {
     "node_modules",
     "venv",
@@ -211,6 +212,8 @@ def _excluded_dir(path: Path, name: str, deny_roots: set[str]) -> bool:
 
 def _excluded_file(root: Path, path: Path, name: str) -> bool:
     if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+        return True
+    if path.stat().st_size > MAX_SOURCE_BYTES:
         return True
     relative = _safe_relative_path(root, path)
     if relative is None:

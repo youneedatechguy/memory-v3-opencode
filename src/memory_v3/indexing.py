@@ -370,7 +370,7 @@ def build_source_chunks(
     source_hash = hash_text(content)
     source_id = make_index_source_id(owner, namespace, canonical_path)
     source_version_key = make_source_version_key(source_id, source_hash)
-    lines = content.splitlines(keepends=True)
+    lines = _split_oversized_lines(content.splitlines(keepends=True), target_chars)
     headings = _heading_paths_by_line(lines)
     spans = _chunk_spans(
         lines,
@@ -483,6 +483,21 @@ def format_chunk_text(
     return (
         f"Source: {relative_path}\nLines: {line_start}-{line_end}\nHeadings: {headings}\n\n{body}"
     )
+
+
+def _split_oversized_lines(lines: list[str], limit: int) -> list[str]:
+    """Split any line longer than ``limit`` chars so no single chunk can exceed
+    the embedding budget. Content is preserved exactly when the pieces are
+    concatenated."""
+    if limit <= 0:
+        return list(lines)
+    result: list[str] = []
+    for line in lines:
+        if len(line) <= limit:
+            result.append(line)
+            continue
+        result.extend(line[offset : offset + limit] for offset in range(0, len(line), limit))
+    return result
 
 
 def _chunk_spans(
