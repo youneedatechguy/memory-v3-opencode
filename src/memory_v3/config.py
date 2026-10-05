@@ -202,6 +202,7 @@ class Config:
             ".trash",
             "shared",
             "LifeOS",
+            "website",
         ]
     )
 

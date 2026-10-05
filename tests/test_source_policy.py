@@ -224,9 +224,9 @@ def test_vendor_directories_are_excluded(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
     write(vault / "business" / "pricing.md")
-    write(vault / "business" / "website" / "src" / "app.js")
-    write(vault / "business" / "website" / "node_modules" / "pkg" / "readme.md")
-    write(vault / "business" / "website" / "dist" / "bundle.js")
+    write(vault / "business" / "api" / "src" / "app.js")
+    write(vault / "business" / "api" / "node_modules" / "pkg" / "readme.md")
+    write(vault / "business" / "api" / "dist" / "bundle.js")
     write(vault / "business" / ".venv" / "lib" / "pkg.py")
     write(vault / "projects" / "api" / "node_modules" / "x" / "index.js")
     write(vault / "projects" / "api" / "build" / "out.js")
@@ -236,7 +236,7 @@ def test_vendor_directories_are_excluded(tmp_path):
     paths = {record.relative_path for record in manifest}
 
     assert "business/pricing.md" in paths
-    assert "business/website/src/app.js" in paths
+    assert "business/api/src/app.js" in paths
     assert not any(
         part in Path(p).parts
         for p in paths
@@ -270,6 +270,21 @@ def test_oversized_sources_are_excluded(tmp_path):
 
     assert "business/notes.md" in paths
     assert "business/huge.json" not in paths
+
+
+def test_website_dev_tree_is_excluded(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write(vault / "business" / "pricing.md")
+    write(vault / "business" / "website" / "src" / "app.ts")
+    write(vault / "business" / "website" / "README.md")
+    write(vault / "business" / "website" / "docs" / "status.md")
+    cfg = Config(vault_path=str(vault), source_policy_owner="owner-a")
+
+    paths = {record.relative_path for record in build_source_manifest(config=cfg, today=TODAY)}
+
+    assert "business/pricing.md" in paths
+    assert not any(p.startswith("business/website/") for p in paths)
 
 
 def test_source_policy_config_controls_owner_roots_and_stale_threshold(tmp_path):
