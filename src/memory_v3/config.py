@@ -405,6 +405,7 @@ def _build_config() -> Config:
                 ".trash",
                 "shared",
                 "LifeOS",
+                "website",
             ],
         ),
     )
