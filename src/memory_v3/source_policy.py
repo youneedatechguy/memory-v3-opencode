@@ -13,6 +13,53 @@ PROJECT_STATUSES = {"active", "paused", "completed", "abandoned", "archived", "s
 TERMINAL_PROJECT_STATUSES = {"completed", "abandoned", "archived", "superseded"}
 INACTIVE_RESEARCH_STATUSES = {"archived", "superseded"}
 TEMP_SUFFIXES = {".log", ".tmp", ".temp", ".bak", ".swp", ".old", ".orig"}
+BINARY_SUFFIXES = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".webp",
+    ".ico",
+    ".tif",
+    ".tiff",
+    ".pdf",
+    ".xlsx",
+    ".xls",
+    ".ods",
+    ".docx",
+    ".doc",
+    ".pptx",
+    ".ppt",
+    ".zip",
+    ".gz",
+    ".tgz",
+    ".tar",
+    ".7z",
+    ".rar",
+    ".mp3",
+    ".wav",
+    ".ogg",
+    ".mp4",
+    ".mov",
+    ".avi",
+    ".webm",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".otf",
+    ".eot",
+    ".so",
+    ".dll",
+    ".dylib",
+    ".exe",
+    ".bin",
+    ".pyc",
+    ".class",
+    ".db",
+    ".sqlite",
+    ".sqlite3",
+}
 LOG_DIR_NAMES = {"log", "logs"}
 VENDOR_DIR_NAMES = {
     "node_modules",
@@ -180,6 +227,7 @@ def _excluded_file(root: Path, path: Path, name: str) -> bool:
         or "scratchpad" in path.name.casefold()
         or _is_log_name(path.name)
         or suffix in TEMP_SUFFIXES
+        or suffix in BINARY_SUFFIXES
         or name.endswith("~")
     )
 
