@@ -3,7 +3,15 @@
 __version__ = "1.0.0"
 __author__ = "Sean Pembroke"
 
-from .providers import get_embedder  # noqa: F401  re-export for public API
+__all__ = ["get_embedder", "get_version_info"]
+
+
+def __getattr__(name: str):
+    if name == "get_embedder":
+        from .providers import get_embedder
+
+        return get_embedder
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def get_version_info() -> dict:
@@ -13,5 +21,5 @@ def get_version_info() -> dict:
         "version": __version__,
         "author": __author__,
         "description": "Brain-inspired persistent memory with governance layers, "
-                       "sensory gating, and multi-graph knowledge representation.",
+        "sensory gating, and multi-graph knowledge representation.",
     }

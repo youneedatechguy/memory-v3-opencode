@@ -1,14 +1,11 @@
 """
 memory-v3 -- Stage 1: Coarse Candidate Filtering
-Fast, broad retrieval to build a candidate pool for fine scoring.
+Fast, broad retrieval to build a candidate pool for fine ranking.
 
 Pipeline:
-  1. Route query to relevant graph layers
-  2. Find top communities by centroid similarity
-  3. Collect memory IDs from those communities
-  4. Fast vector search (vec0)
-  5. FTS5 keyword search
-  6. Union all candidate IDs, cap at STAGE1_MAX_CANDIDATES
+  1. Fast vector search (vec0)
+  2. FTS5 keyword search
+  3. Union candidate IDs, cap at STAGE1_MAX_CANDIDATES
 """
 
 from __future__ import annotations
@@ -21,6 +18,9 @@ import numpy as np
 
 if TYPE_CHECKING:
     from ..config import Config
+    from .filters import RetrievalFilter
+
+from .filters import build_eligibility_where, list_eligible_ids
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,11 @@ logger = logging.getLogger(__name__)
 def _serialize_f32(vec: list[float]) -> bytes:
     """Serialize a list of floats to raw bytes for sqlite-vec."""
     return np.array(vec, dtype=np.float32).tobytes()
+
+
+def _l2_distance(query: np.ndarray, embedding: bytes) -> float:
+    vector = np.frombuffer(embedding, dtype=np.float32)
+    return float(np.linalg.norm(query - vector))
 
 
 def _escape_fts5_query(query: str) -> str:
@@ -44,46 +49,11 @@ def _escape_fts5_query(query: str) -> str:
     return escaped or '""'
 
 
-def _get_community_candidate_ids(
-    conn: sqlite3.Connection,
-    query_embedding: list[float],
-    config: "Config",
-) -> set[int]:
-    """
-    Find top communities by centroid similarity and return all memory IDs
-    belonging to those communities.
-    """
-    candidate_ids: set[int] = set()
-
-    try:
-        from ..graphs.communities import get_community_for_query
-
-        top_n = getattr(config, "stage1_community_top", 3)
-        community_ids = get_community_for_query(query_embedding, conn, top_n=top_n)
-
-        if not community_ids:
-            return candidate_ids
-
-        # Collect all memory IDs with matching cluster_id
-        placeholders = ",".join("?" for _ in community_ids)
-        rows = conn.execute(
-            f"SELECT id FROM memories WHERE cluster_id IN ({placeholders}) AND archived = 0",
-            community_ids,
-        ).fetchall()
-
-        for row in rows:
-            candidate_ids.add(row[0] if isinstance(row, tuple) else row["id"])
-
-    except Exception as exc:
-        logger.debug("Community candidate lookup skipped: %s", exc)
-
-    return candidate_ids
-
-
 def _get_vector_candidate_ids(
     conn: sqlite3.Connection,
     query_embedding: list[float],
     limit: int = 200,
+    retrieval_filter: RetrievalFilter | None = None,
 ) -> list[int]:
     """
     Fast vector similarity search via the vec0 virtual table.
@@ -91,13 +61,26 @@ def _get_vector_candidate_ids(
     Returns memory IDs ordered by ascending distance (most similar first).
     """
     try:
-        rows = conn.execute(
-            "SELECT id, distance FROM memory_vec "
-            "WHERE embedding MATCH ? "
-            "ORDER BY distance LIMIT ?",
-            (_serialize_f32(query_embedding), limit),
-        ).fetchall()
-        return [row[0] if isinstance(row, tuple) else row["id"] for row in rows]
+        query_vec = np.array(query_embedding, dtype=np.float32)
+        candidates: list[tuple[int, float]] = []
+        eligible_ids = list_eligible_ids(conn, retrieval_filter)
+        batch_size = 500
+        for i in range(0, len(eligible_ids), batch_size):
+            batch = eligible_ids[i : i + batch_size]
+            placeholders = ", ".join("?" for _ in batch)
+            rows = conn.execute(
+                f"SELECT id, embedding FROM memory_vec WHERE id IN ({placeholders})",
+                batch,
+            ).fetchall()
+            candidates.extend(
+                (
+                    row[0] if isinstance(row, tuple) else row["id"],
+                    _l2_distance(query_vec, row[1] if isinstance(row, tuple) else row["embedding"]),
+                )
+                for row in rows
+            )
+        candidates.sort(key=lambda item: (item[1], item[0]))
+        return [mid for mid, _distance in candidates[:limit]]
     except Exception as exc:
         logger.debug("Vector search failed: %s", exc)
         return []
@@ -107,6 +90,7 @@ def _get_fts_candidate_ids(
     conn: sqlite3.Connection,
     query: str,
     limit: int = 200,
+    retrieval_filter: RetrievalFilter | None = None,
 ) -> list[int]:
     """
     FTS5 keyword search for candidate memory IDs.
@@ -115,11 +99,13 @@ def _get_fts_candidate_ids(
     """
     escaped = _escape_fts5_query(query)
     try:
+        where_sql, params = build_eligibility_where(retrieval_filter, alias="m")
         rows = conn.execute(
-            "SELECT rowid, rank FROM memory_fts "
-            "WHERE memory_fts MATCH ? "
+            "SELECT memory_fts.rowid, rank FROM memory_fts "
+            "JOIN memories m ON m.id = memory_fts.rowid "
+            f"WHERE memory_fts MATCH ? AND {where_sql} "
             "ORDER BY rank LIMIT ?",
-            (escaped, limit),
+            (escaped, *params, limit),
         ).fetchall()
         return [row[0] if isinstance(row, tuple) else row["rowid"] for row in rows]
     except Exception as exc:
@@ -131,13 +117,14 @@ def get_candidates(
     conn: sqlite3.Connection,
     query: str,
     query_embedding: list[float],
-    config: "Config",
+    config: Config,
+    retrieval_filter: RetrievalFilter | None = None,
 ) -> list[int]:
     """
     Stage 1: Build a broad candidate pool from multiple retrieval channels.
 
-    Combines community-based, vector, and keyword candidates into a single
-    deduplicated list, capped at config.stage1_max_candidates.
+    Combines vector and keyword candidates into a single deduplicated list,
+    capped at config.stage1_max_candidates.
 
     Args:
         conn: SQLite connection with memory tables.
@@ -150,18 +137,24 @@ def get_candidates(
     """
     max_candidates = getattr(config, "stage1_max_candidates", 500)
 
-    # --- Channel 1: Community-routed candidates ---
-    community_ids = _get_community_candidate_ids(conn, query_embedding, config)
+    # --- Channel 1: Vector similarity candidates ---
+    vec_ids = _get_vector_candidate_ids(
+        conn,
+        query_embedding,
+        limit=200,
+        retrieval_filter=retrieval_filter,
+    )
 
-    # --- Channel 2: Vector similarity candidates ---
-    vec_ids = _get_vector_candidate_ids(conn, query_embedding, limit=200)
-
-    # --- Channel 3: FTS5 keyword candidates ---
-    fts_ids = _get_fts_candidate_ids(conn, query, limit=200)
+    # --- Channel 2: FTS5 keyword candidates ---
+    fts_ids = _get_fts_candidate_ids(
+        conn,
+        query,
+        limit=200,
+        retrieval_filter=retrieval_filter,
+    )
 
     # --- Union all channels, preserving rough ordering ---
-    # Vector and FTS results are ordered by relevance; community IDs are unordered.
-    # We use an ordered set approach: vec first, then FTS, then community.
+    # Vector and FTS results are ordered by relevance.
     seen: set[int] = set()
     ordered: list[int] = []
 
@@ -175,17 +168,15 @@ def get_candidates(
             seen.add(mid)
             ordered.append(mid)
 
-    for mid in community_ids:
-        if mid not in seen:
-            seen.add(mid)
-            ordered.append(mid)
-
     # Cap at max_candidates
     result = ordered[:max_candidates]
 
     logger.debug(
-        "Stage 1 candidates: %d (vec=%d, fts=%d, community=%d, deduped=%d)",
-        len(result), len(vec_ids), len(fts_ids), len(community_ids), len(ordered),
+        "Stage 1 candidates: %d (vec=%d, fts=%d, deduped=%d)",
+        len(result),
+        len(vec_ids),
+        len(fts_ids),
+        len(ordered),
     )
 
     return result

@@ -3,14 +3,20 @@
 ## Session Startup
 
 At the start of each session:
-1. Call `agent_sync("opencode")` to catch up on memory changes from other agents
-2. Call `search("current project context")` to recall relevant memories
-3. Call `list_recent` (last 24h) if returning to in-progress work
+1. Call `list_active_handoffs(agent_id="opencode")` for temporary cross-session state from other active agents.
+2. Search memory only for a specific fact or project question; do not run generic startup searches.
+3. Do not call `list_recent` as a default startup step.
+
+`agent_sync` is a deprecated compatibility API. Its default mode returns active handoffs only; legacy changelog sync is removed.
 
 ## Session End
 
 When switching tasks or ending a session:
-1. Call `extract_from_conversation` with a summary of what was decided/built
+1. Put durable information in canonical vault/project docs first.
+2. Use a direct handoff only for temporary cross-session state that another agent needs; default expiry is 30 days (`MEMORY_V3_HANDOFF_TTL_DAYS`).
+3. Do not call `extract_from_conversation` as a blanket session-end requirement.
+
+Direct writes, vault auto-extract, and the handoff sweeper are independently kill-switched by `MEMORY_V3_DIRECT_WRITES_ENABLED`, `MEMORY_V3_VAULT_AUTO_EXTRACT_ENABLED`, and `MEMORY_V3_HANDOFF_SWEEPER_ENABLED`.
 
 ## Provider Config Reference
 
@@ -38,9 +44,12 @@ memory-v3 stats
 memory-v3 search "query"
 memory-v3 add "fact" --type fact --tags tag1,tag2
 memory-v3 recent --hours 48
+memory-v3 reindex --force
+memory-v3 handoffs list --agent-id opencode --since 2026-10-02T00:00:00+00:00
+memory-v3 handoffs sweep
 
-# Build knowledge graphs from existing memories
-memory-v3-build-kg
+# Deprecated graph command retained for parser compatibility; always exits nonzero
+memory-v3 build-kg
 
 # Migrate from v2
 memory-v3-migrate
@@ -58,13 +67,13 @@ pytest tests/test_scoring/  # scoring subsystem only
 
 ```
 src/memory_v3/
-  server.py          # FastMCP server — 24 MCP tool endpoints (entry point)
-  db.py              # SQLite schema, CRUD, FTS5 + sqlite-vec search
+  server.py          # FastMCP server — 26 MCP tool endpoints (entry point)
+  db.py              # SQLite schema v4 fresh-shadow target, CRUD, FTS5 + sqlite-vec search
   config.py          # All config via MEMORY_V3_* env vars, get_config() singleton
   embeddings.py      # Embedding layer — delegates to providers/get_embedder()
   security.py        # Credential scanning (regex)
   cli.py             # CLI commands
-  build_kg.py        # Graph construction from existing memories
+  build_kg.py        # Dormant legacy graph code; not part of active retrieval/indexing
   migration.py       # v2 -> v3 migration
 
   providers/         # Provider abstraction (ollama/openai/anthropic/local)
@@ -80,7 +89,7 @@ src/memory_v3/
     write_queue.py   # Priority queue (1-5), batch flush, retry
     batch_embedder.py
 
-  graphs/            # MAGMA — 4 NetworkX DiGraph layers
+  graphs/            # Dormant legacy graph modules; graph artifacts are inactive
     __init__.py      # GraphManager
     semantic.py      # related_to, uses, depends_on, etc.
     temporal.py      # preceded_by, followed_by, etc.
@@ -98,10 +107,13 @@ src/memory_v3/
     hallucination.py # HaluMem confidence decay + verification
     action_decider.py
 
+  indexing.py        # Chunk files and atomically replace each source in one transaction
+
   retrieval/
-    stage1_coarse.py # Community routing + vec0 + FTS5 (up to 500 candidates)
+    filters.py       # Mandatory owner/source eligibility before ranking
+    stage1_coarse.py # Lexical/vector candidates, graph-free
     stage2_fine.py   # RRF + ACT-R + fan effect + HaluMem confidence scoring
-    stage3_organize.py # Graph neighbors + structure hints + zettelkasten see-also
+    stage3_organize.py # Graph-free result organization and provenance
 
   scoring/
     actr.py          # ACT-R base-level + spreading activation + noise
@@ -122,7 +134,15 @@ MEMORY_V3_LLM_PROVIDER=ollama|openai|anthropic # default: ollama
 
 ### Dimension mismatch
 
-`memory_vec` dim is fixed at DB creation. Switching providers with different dims requires `memory-v3 reindex --reembed` (drops and rebuilds the vector table — prompts for confirmation). Server startup will `sys.exit(1)` if configured dim doesn't match the DB.
+`memory_vec` dim is fixed at DB creation. `memory-v3 reindex --reembed` is retained only for parser compatibility and fails closed before provider imports or DB access. Switching providers with different dims requires the explicit fresh-shadow migration/reindex workflow. Server startup will `sys.exit(1)` if configured dim doesn't match the DB.
+
+## Lean v4 Indexing and Retrieval
+
+- Schema v4 is the fresh-shadow target. Normal startup rejects incompatible schemas rather than performing an in-place downgrade.
+- Vault indexing builds all chunks and embeddings for a source first, then atomically replaces that source's memories, vectors, FTS rows, and file hash rows in one SQLite transaction.
+- Retrieval is graph-free and uses mandatory owner/source eligibility before lexical/vector ranking.
+- Direct writes are temporary handoffs only. Durable direct memory records and admin override writes are removed.
+- Graph modules and graph artifacts are dormant. `build-kg` is hard-disabled and `graph-debt` is not a CLI command.
 
 ## Key Config Env Vars
 
@@ -132,9 +152,17 @@ MEMORY_V3_VAULT       Markdown vault directory
 MEMORY_V3_EMBED_MODEL Embedding model name (default: nomic-embed-text)
 MEMORY_V3_LLM_MODEL   LLM model name (default: qwen2.5:3b)
 MEMORY_V3_EMBED_DIM   Embedding dimensions (default: 768)
+MEMORY_V3_INDEXING_ENABLED              Enable vault indexing/reindex
+MEMORY_V3_VAULT_AUTO_EXTRACT_ENABLED   Enable policy-controlled vault auto-extract
+MEMORY_V3_DIRECT_WRITES_ENABLED         Enable direct write endpoints
+MEMORY_V3_HANDOFF_SWEEPER_ENABLED       Enable deletion of expired handoffs
+MEMORY_V3_HANDOFF_TTL_DAYS              Handoff expiry window in days
+MEMORY_V3_SOURCE_POLICY_OWNER           Owner assigned to indexed vault sources
+MEMORY_V3_SOURCE_POLICY_INCLUDE_ROOTS   Comma-separated vault roots to index
+MEMORY_V3_SOURCE_POLICY_DENY_ROOTS      Comma-separated vault roots to exclude
 ```
 
-Feature flags all follow `MEMORY_V3_ENABLE_<NAME>=true|false`.
+Legacy generation, retrieval-v2, graph mutation/debt, durable direct-write override, historical retention/rank, and legacy sync flags are not supported.
 
 ## OpenCode MCP Config
 
@@ -171,6 +199,6 @@ OpenCode v1.14+ format — key differences from older docs: top-level key is `mc
 
 - `config.py` uses a cached singleton via `get_config()` — call `reset_config()` in tests after setting env vars.
 - Provider imports are lazy (inside each provider class) — missing optional packages raise a clear ImportError at first use, not at server start.
-- `memory_vec` dim is fixed at DB creation time — cannot be altered in-place, use `memory-v3 reindex --reembed`.
-- Graph state is serialized to `~/.memory-v3/graphs/` — if you change graph schema, delete these files and let them rebuild on next run.
+- `memory_vec` dim is fixed at DB creation time — cannot be altered in-place; use the explicit fresh-shadow migration/reindex workflow.
+- Graph state under `~/.memory-v3/graphs/` is dormant and must not be used by active indexing or retrieval.
 - `ollama` is now an optional extra (`pip install "memory-v3[ollama]"`), not a core dependency.

@@ -8,23 +8,24 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
 
 # ---------------------------------------------------------------------------
 # Governance Layer Configuration
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class LayerConfig:
     """Configuration for a single governance layer."""
+
     name: str
     layer_id: int
     decay_rate: float
     activation_floor: float
-    fademem_beta: float          # FadeMem recency weight (N/A stored as 0.0)
-    archive_threshold: float     # 0.0 = never archive
-    min_archive_age_days: int    # minimum age before archiving is considered
-    archivable: bool = True      # False = NEVER archive regardless of scores
+    fademem_beta: float  # FadeMem recency weight (N/A stored as 0.0)
+    archive_threshold: float  # 0.0 = never archive
+    min_archive_age_days: int  # minimum age before archiving is considered
+    archivable: bool = True  # False = NEVER archive regardless of scores
 
 
 # The four governance layers -- immutable by design
@@ -33,7 +34,7 @@ LAYER_CONSTITUTIONAL = LayerConfig(
     layer_id=1,
     decay_rate=0.0,
     activation_floor=5.0,
-    fademem_beta=0.0,            # N/A -- no decay
+    fademem_beta=0.0,  # N/A -- no decay
     archive_threshold=0.0,
     min_archive_age_days=0,
     archivable=False,
@@ -84,6 +85,7 @@ GOVERNANCE_LAYERS: dict[int, LayerConfig] = {
 # Main Config dataclass
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Config:
     """Complete memory-v3 configuration. Populated from env vars once."""
@@ -98,8 +100,12 @@ class Config:
     embed_model: str = "nomic-embed-text"
     llm_model: str = "qwen2.5:3b"
     embed_dim: int = 768
-    embed_provider: str = "ollama"   # MEMORY_V3_EMBED_PROVIDER
-    llm_provider: str = "ollama"     # MEMORY_V3_LLM_PROVIDER
+    embed_provider: str = "ollama"  # MEMORY_V3_EMBED_PROVIDER
+    llm_provider: str = "ollama"  # MEMORY_V3_LLM_PROVIDER
+    embed_retry_max_attempts: int = 3
+    embed_retry_base_seconds: float = 0.5
+    embed_retry_max_seconds: float = 5.0
+    embed_retry_max_total_seconds: float = 10.0
 
     # --- ACT-R cognitive architecture constants ---
     actr_decay_d: float = 0.5
@@ -112,7 +118,7 @@ class Config:
     fademem_alpha: float = 0.30
     fademem_beta: float = 0.25
     fademem_gamma: float = 0.25
-    fademem_delta: float = 0.20   # surprise component
+    fademem_delta: float = 0.20  # surprise component
 
     # --- Fan effect ---
     fan_delta: float = 0.3
@@ -155,14 +161,49 @@ class Config:
     enable_structure_tags: bool = True
 
     # --- Multi-agent authority chain ---
-    authority_chain: dict = field(default_factory=lambda: {
-        "human": 1,
-        "primary_agent": 2,
-        "coordinator": 3,
-        "worker": 4,
-        "indexer": 5,
-        "extractor": 6,
-    })
+    authority_chain: dict = field(
+        default_factory=lambda: {
+            "human": 1,
+            "primary_agent": 2,
+            "coordinator": 3,
+            "worker": 4,
+            "indexer": 5,
+            "extractor": 6,
+        }
+    )
+
+    # --- Rollout gates ---
+    indexing_enabled: bool = False
+    vault_auto_extract_enabled: bool = False
+    direct_writes_enabled: bool = False
+    handoff_sweeper_enabled: bool = False
+    handoff_ttl_days: int = 30
+
+    # --- Source policy ---
+    source_policy_owner: str = "owner"
+    source_policy_project_stale_days: int = 90
+    source_policy_research_recency_days: int = 180
+    source_policy_include_roots: list[str] = field(
+        default_factory=lambda: [
+            "AGENTS.md",
+            "business",
+            "decisions",
+            "infrastructure",
+            "research",
+            "docs",
+            "projects",
+        ]
+    )
+    source_policy_deny_roots: list[str] = field(
+        default_factory=lambda: [
+            "inbox",
+            "daily",
+            "archive",
+            ".trash",
+            "shared",
+            "LifeOS",
+        ]
+    )
 
     # --- Governance layers (immutable, not from env) ---
     governance_layers: dict = field(default_factory=lambda: dict(GOVERNANCE_LAYERS))
@@ -173,12 +214,31 @@ def _env(key: str, default: str = "") -> str:
     return os.environ.get(f"MEMORY_V3_{key}", default)
 
 
+def _parse_bool(env_name: str, val: str) -> bool:
+    normalized = val.strip().lower()
+    if normalized in ("1", "true", "yes", "on"):
+        return True
+    if normalized in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{env_name} must be a boolean: true/false, 1/0, yes/no, or on/off")
+
+
 def _env_bool(key: str, default: bool) -> bool:
     """Read a MEMORY_V3_ENABLE_* env var as bool."""
-    val = os.environ.get(f"MEMORY_V3_ENABLE_{key}", "")
+    env_name = f"MEMORY_V3_ENABLE_{key}"
+    val = os.environ.get(env_name, "")
     if not val:
         return default
-    return val.lower() in ("1", "true", "yes", "on")
+    return _parse_bool(env_name, val)
+
+
+def _env_bool_exact(key: str, default: bool) -> bool:
+    """Read a MEMORY_V3_* env var as bool."""
+    env_name = f"MEMORY_V3_{key}"
+    val = os.environ.get(env_name, "")
+    if not val:
+        return default
+    return _parse_bool(env_name, val)
 
 
 def _env_float(key: str, default: float) -> float:
@@ -195,6 +255,28 @@ def _env_int(key: str, default: int) -> int:
     if not val:
         return default
     return int(val)
+
+
+def _env_positive_int(key: str, default: int) -> int:
+    val = _env_int(key, default)
+    if val <= 0:
+        raise ValueError(f"MEMORY_V3_{key} must be a positive integer")
+    return val
+
+
+def _env_nonnegative_float(key: str, default: float) -> float:
+    val = _env_float(key, default)
+    if val < 0:
+        raise ValueError(f"MEMORY_V3_{key} must be greater than or equal to 0")
+    return val
+
+
+def _env_list(key: str, default: list[str]) -> list[str]:
+    """Read a MEMORY_V3_* env var as a comma-separated list."""
+    val = os.environ.get(f"MEMORY_V3_{key}", "")
+    if not val:
+        return list(default)
+    return [item.strip() for item in val.split(",") if item.strip()]
 
 
 def _build_config() -> Config:
@@ -216,58 +298,63 @@ def _build_config() -> Config:
             "extractor": 6,
         }
 
+    embed_retry_base_seconds = _env_nonnegative_float("EMBED_RETRY_BASE_SECONDS", 0.5)
+    embed_retry_max_seconds = _env_nonnegative_float("EMBED_RETRY_MAX_SECONDS", 5.0)
+    if embed_retry_max_seconds < embed_retry_base_seconds:
+        raise ValueError(
+            "MEMORY_V3_EMBED_RETRY_MAX_SECONDS must be greater than or equal to "
+            "MEMORY_V3_EMBED_RETRY_BASE_SECONDS"
+        )
+
     return Config(
         # Paths
         db_path=_env("DB", os.path.join(default_base, "memory.db")),
         vault_path=_env("VAULT", ""),
         graph_dir=_env("GRAPH_DIR", os.path.join(default_base, "graphs")),
         cache_dir=_env("CACHE", os.path.join(default_base, "cache")),
-
         # Model
         embed_model=_env("EMBED_MODEL", "nomic-embed-text"),
         llm_model=_env("LLM_MODEL", "qwen2.5:3b"),
         embed_dim=_env_int("EMBED_DIM", 768),
         embed_provider=_env("EMBED_PROVIDER", "ollama"),
         llm_provider=_env("LLM_PROVIDER", "ollama"),
-
+        embed_retry_max_attempts=_env_positive_int("EMBED_RETRY_MAX_ATTEMPTS", 3),
+        embed_retry_base_seconds=embed_retry_base_seconds,
+        embed_retry_max_seconds=embed_retry_max_seconds,
+        embed_retry_max_total_seconds=_env_nonnegative_float(
+            "EMBED_RETRY_MAX_TOTAL_SECONDS",
+            10.0,
+        ),
         # ACT-R
         actr_decay_d=_env_float("ACTR_DECAY_D", 0.5),
         actr_s_max=_env_float("ACTR_S_MAX", 1.6),
         actr_noise_s=_env_float("ACTR_NOISE_S", 0.25),
         actr_retrieval_tau=_env_float("ACTR_RETRIEVAL_TAU", -0.5),
-
         # FadeMem
         fademem_alpha=_env_float("FADEMEM_ALPHA", 0.30),
         fademem_beta=_env_float("FADEMEM_BETA", 0.25),
         fademem_gamma=_env_float("FADEMEM_GAMMA", 0.25),
         fademem_delta=_env_float("FADEMEM_DELTA", 0.20),
-
         # Fan effect
         fan_delta=_env_float("FAN_DELTA", 0.3),
-
         # Sensory filter
         sensory_min_length=_env_int("SENSORY_MIN_LENGTH", 20),
         sensory_dedup_threshold=_env_float("SENSORY_DEDUP_THRESHOLD", 0.95),
-
         # Retrieval
         rrf_k=_env_int("RRF_K", 60),
         stage1_max_candidates=_env_int("STAGE1_MAX_CANDIDATES", 500),
         stage1_community_top=_env_int("STAGE1_COMMUNITY_TOP", 3),
         zettel_link_threshold=_env_float("ZETTEL_LINK_THRESHOLD", 0.5),
-
         # Async
         async_enabled=_env_bool("ASYNC", True),
         async_workers=_env_int("ASYNC_WORKERS", 2),
         async_batch_size=_env_int("ASYNC_BATCH_SIZE", 10),
-
         # Consolidation
         consolidation_merge_threshold=_env_float("CONSOLIDATION_MERGE_THRESHOLD", 0.85),
         consolidation_min_group_size=_env_int("CONSOLIDATION_MIN_GROUP_SIZE", 3),
-
         # HaluMem
         halumem_confidence_decay_days=_env_int("HALUMEM_CONFIDENCE_DECAY_DAYS", 90),
         halumem_confidence_decay_rate=_env_float("HALUMEM_CONFIDENCE_DECAY_RATE", 0.1),
-
         # Feature flags
         enable_multigraph=_env_bool("MULTIGRAPH", True),
         enable_sensory=_env_bool("SENSORY", True),
@@ -281,9 +368,44 @@ def _build_config() -> Config:
         enable_consolidation=_env_bool("CONSOLIDATION", True),
         enable_async=_env_bool("ASYNC", True),
         enable_structure_tags=_env_bool("STRUCTURE_TAGS", True),
-
         # Multi-agent
         authority_chain=authority_chain,
+        # Rollout gates
+        indexing_enabled=_env_bool_exact("INDEXING_ENABLED", False),
+        vault_auto_extract_enabled=_env_bool_exact("VAULT_AUTO_EXTRACT_ENABLED", False),
+        direct_writes_enabled=_env_bool_exact("DIRECT_WRITES_ENABLED", False),
+        handoff_sweeper_enabled=_env_bool_exact("HANDOFF_SWEEPER_ENABLED", False),
+        handoff_ttl_days=_env_positive_int("HANDOFF_TTL_DAYS", 30),
+        # Source policy
+        source_policy_owner=_env("SOURCE_POLICY_OWNER", "owner"),
+        source_policy_project_stale_days=_env_positive_int("SOURCE_POLICY_PROJECT_STALE_DAYS", 90),
+        source_policy_research_recency_days=_env_positive_int(
+            "SOURCE_POLICY_RESEARCH_RECENCY_DAYS",
+            180,
+        ),
+        source_policy_include_roots=_env_list(
+            "SOURCE_POLICY_INCLUDE_ROOTS",
+            [
+                "AGENTS.md",
+                "business",
+                "decisions",
+                "infrastructure",
+                "research",
+                "docs",
+                "projects",
+            ],
+        ),
+        source_policy_deny_roots=_env_list(
+            "SOURCE_POLICY_DENY_ROOTS",
+            [
+                "inbox",
+                "daily",
+                "archive",
+                ".trash",
+                "shared",
+                "LifeOS",
+            ],
+        ),
     )
 
 
@@ -291,7 +413,7 @@ def _build_config() -> Config:
 # Singleton cache
 # ---------------------------------------------------------------------------
 
-_config: Optional[Config] = None
+_config: Config | None = None
 
 
 def get_config() -> Config:

@@ -5,10 +5,11 @@ Credential scanning, integrity manifests, memory sanitization.
 
 import hashlib
 import json
-import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .source_policy import build_source_manifest, classify_source_path
 
 # ---------- Credential Scanning ----------
 
@@ -90,8 +91,9 @@ def generate_manifest(vault_path: str | Path) -> dict:
         "files": {},
     }
 
-    for f in vault_path.rglob("*.md"):
-        rel = str(f.relative_to(vault_path)).replace("\\", "/")
+    for source in build_source_manifest(vault_path):
+        rel = source.relative_path
+        f = vault_path / rel
         content = f.read_bytes()
         manifest["files"][rel] = {
             "sha256": hashlib.sha256(content).hexdigest(),
@@ -127,7 +129,7 @@ def check_integrity(vault_path: str | Path) -> dict:
     manifest = json.loads(manifest_file.read_text())
     current = generate_manifest(vault_path)
 
-    result = {"ok": [], "modified": [], "new": [], "missing": []}
+    result = {"ok": [], "modified": [], "new": [], "missing": [], "excluded_by_policy": []}
 
     old_files = set(manifest["files"].keys())
     new_files = set(current["files"].keys())
@@ -146,6 +148,10 @@ def check_integrity(vault_path: str | Path) -> dict:
 
     # Missing files
     for f in old_files - new_files:
-        result["missing"].append(f)
+        path = vault_path / f
+        if path.exists() and classify_source_path(path, vault_path) is None:
+            result["excluded_by_policy"].append(f)
+        else:
+            result["missing"].append(f)
 
     return result

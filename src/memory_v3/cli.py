@@ -7,12 +7,12 @@ Same pattern as v2 but with new commands for v3 features.
 import argparse
 import json
 import sys
-from typing import Optional
 
 
 def _get_conn():
     """Get a database connection."""
     from .db import init_db
+
     return init_db()
 
 
@@ -27,13 +27,31 @@ def _pp(obj):
     print(json.dumps(obj, indent=2, default=str))
 
 
+def _as_obj(obj):
+    if isinstance(obj, str):
+        try:
+            return json.loads(obj)
+        except (json.JSONDecodeError, TypeError):
+            return obj
+    return obj
+
+
+def _pp_exit_on_failure(obj):
+    parsed = _as_obj(obj)
+    _pp(parsed)
+    if isinstance(parsed, dict) and (parsed.get("error") or parsed.get("errors", 0)):
+        sys.exit(1)
+
+
 # ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
+
 def cmd_stats(args):
     """Show memory system statistics."""
     from .server import stats
+
     _pp(stats())
 
 
@@ -41,6 +59,7 @@ def cmd_add(args):
     """Add a new memory."""
     tags = args.tags.split(",") if args.tags else None
     from .server import add_memory
+
     result = add_memory(
         content=args.content,
         content_type=args.type,
@@ -58,6 +77,7 @@ def cmd_add(args):
 def cmd_search(args):
     """Search memories."""
     from .server import search
+
     result = search(query=args.query, limit=args.limit, content_type=args.type)
     _pp(result)
 
@@ -65,6 +85,7 @@ def cmd_search(args):
 def cmd_keyword(args):
     """Keyword search (BM25)."""
     from .server import keyword_search
+
     result = keyword_search(keywords=args.keywords, limit=args.limit)
     _pp(result)
 
@@ -72,6 +93,7 @@ def cmd_keyword(args):
 def cmd_get(args):
     """Get a single memory by ID."""
     from .server import get
+
     result = get(memory_id=args.id)
     _pp(result)
 
@@ -80,6 +102,7 @@ def cmd_update(args):
     """Update an existing memory."""
     tags = args.tags.split(",") if args.tags else None
     from .server import update
+
     result = update(
         memory_id=args.id,
         content=args.content,
@@ -94,6 +117,7 @@ def cmd_update(args):
 def cmd_forget(args):
     """Archive a memory."""
     from .server import forget
+
     result = forget(memory_id=args.id, reason=args.reason)
     _pp(result)
 
@@ -101,6 +125,7 @@ def cmd_forget(args):
 def cmd_recent(args):
     """List recent memories."""
     from .server import list_recent
+
     result = list_recent(hours=args.hours, limit=args.limit)
     _pp(result)
 
@@ -108,92 +133,24 @@ def cmd_recent(args):
 def cmd_topics(args):
     """List topic clusters."""
     from .server import list_topics
+
     result = list_topics(limit=args.limit)
     _pp(result)
 
 
 def _cmd_reembed(args):
-    """Drop and rebuild memory_vec with the current embedding provider."""
-    from .config import get_config
-    from .providers import get_embedder
-
-    cfg = get_config()
-    embedder = get_embedder()
-
-    print(f"\n[memory-v3] REEMBED WARNING")
-    print(f"  This will drop and recreate memory_vec (dim={embedder.dim})")
-    print(f"  and re-embed ALL memories using provider '{cfg.embed_provider}'")
-    print(f"  model='{embedder.model}'.")
-    print(f"")
-    print(f"  Depending on your provider and memory count, this may incur API costs.")
-    print(f"  Check your provider's pricing before continuing.")
-    print(f"")
-    confirm = input("  Type 'yes' to continue: ").strip().lower()
-    if confirm != "yes":
-        print("Aborted.")
-        return
-
-    from .db import init_db
-    conn = init_db()
-
-    try:
-        # 1. Flush the embedding cache
-        import shutil
-        import os
-        cache_dir = cfg.cache_dir if cfg.cache_dir else None
-        if cache_dir and os.path.isdir(cache_dir):
-            shutil.rmtree(cache_dir)
-            os.makedirs(cache_dir, exist_ok=True)
-            print(f"  Cache cleared: {cache_dir}")
-
-        # 2. Drop and recreate memory_vec
-        conn.execute("DROP TABLE IF EXISTS memory_vec")
-        conn.execute(
-            f"CREATE VIRTUAL TABLE memory_vec USING vec0(embedding float[{embedder.dim}])"
-        )
-        conn.commit()
-        print(f"  memory_vec recreated with dim={embedder.dim}")
-
-        # 3. Re-embed all memories in batches
-        rows = conn.execute(
-            "SELECT id, content FROM memories ORDER BY id"
-        ).fetchall()
-        total = len(rows)
-        print(f"  Re-embedding {total} memories...")
-        batch_size = 50
-        import json as _json
-        for i in range(0, total, batch_size):
-            batch = rows[i : i + batch_size]
-            ids = [r[0] for r in batch]
-            texts = [r[1] for r in batch]
-            try:
-                vectors = embedder.embed_batch(texts)
-            except Exception:
-                vectors = [embedder.embed(t) for t in texts]
-            for mem_id, vec in zip(ids, vectors):
-                conn.execute(
-                    "INSERT OR REPLACE INTO memory_vec(rowid, embedding) VALUES (?, ?)",
-                    (mem_id, _json.dumps(vec)),
-                )
-            conn.commit()
-            done = min(i + batch_size, total)
-            print(f"  {done}/{total} done")
-
-        # 4. Recompute centroids (non-fatal if it fails)
-        try:
-            from .graphs import GraphManager
-            gm = GraphManager()
-            gm.recompute_centroids(conn)
-            print("  Centroids recomputed.")
-        except Exception as e:
-            print(f"  Centroid recomputation skipped: {e}")
-
-        print(
-            f"\n  Done. All {total} memories re-embedded with"
-            f" {cfg.embed_provider}:{embedder.model}"
-        )
-    finally:
-        conn.close()
+    message = (
+        "memory-v3 reindex --reembed is disabled; use the explicit "
+        "shadow migration/reindex workflow"
+    )
+    _pp(
+        {
+            "error": message,
+            "code": "reembed_disabled",
+            "status": "disabled",
+        }
+    )
+    sys.exit(1)
 
 
 def cmd_reindex(args):
@@ -202,13 +159,32 @@ def cmd_reindex(args):
         _cmd_reembed(args)
         return
     from .server import reindex
+
     result = reindex(force=args.force)
-    _pp(result)
+    _pp_exit_on_failure(result)
+
+
+def cmd_handoffs(args):
+    """Manage active handoffs."""
+    if args.handoff_action == "list":
+        from .server import list_active_handoffs
+
+        result = list_active_handoffs(agent_id=args.agent_id, since=args.since)
+        _pp_exit_on_failure(result)
+        return
+    if args.handoff_action == "sweep":
+        from .server import sweep_expired_handoffs
+
+        result = sweep_expired_handoffs(now=args.now)
+        _pp_exit_on_failure(result)
+        return
+    raise ValueError(f"Unknown handoff_action: {args.handoff_action}")
 
 
 def cmd_integrity(args):
     """Check vault integrity."""
     from .server import check_integrity
+
     result = check_integrity()
     _pp(result)
 
@@ -221,8 +197,85 @@ def cmd_extract(args):
     else:
         text = sys.stdin.read()
     from .server import extract_from_conversation
+
     result = extract_from_conversation(text=text, source=args.source, author=args.author)
     _pp(result)
+
+
+def cmd_auto_extract(args):
+    """Auto-extract memory from session boundary triggers."""
+
+    from .auto_extract.runner import AutoExtractRunner
+
+    runner = AutoExtractRunner()
+
+    if args.auto_action == "run":
+        res = runner.run(
+            trigger_type=args.trigger,
+            fingerprint=args.fingerprint,
+            dry_run=args.dry_run,
+            force=args.force,
+            git_dir=args.git_dir,
+            work_tree=args.work_tree,
+            text_override=args.text,
+            vault_dir=args.vault_dir,
+            since_days=args.since_days,
+            max_vault_files=args.max_vault_files,
+            max_chars_per_file=args.max_chars_per_file,
+        )
+        _pp(
+            {
+                "trigger_type": res.trigger_type,
+                "fingerprint": res.fingerprint,
+                "collected_chars": res.collected_chars,
+                "extracted": res.extracted,
+                "skipped": res.skipped,
+                "reason": res.reason,
+            }
+        )
+        return
+
+    if args.auto_action == "status":
+        entry = runner.state.get(args.trigger, args.fingerprint)
+        if not entry:
+            _pp({"status": "not_found", "trigger": args.trigger, "fingerprint": args.fingerprint})
+            return
+        _pp(
+            {
+                "status": entry.status,
+                "trigger": args.trigger,
+                "fingerprint": entry.fingerprint,
+                "last_run_ts": entry.last_run_ts,
+            }
+        )
+        return
+
+    if args.auto_action == "print-git-hook":
+        print(
+            "#!/bin/sh\n"
+            "set -e\n"
+            'MEMORY_V3_BIN="$(command -v memory-v3)"\n'
+            'if [ -z "$MEMORY_V3_BIN" ]; then\n'
+            "  echo 'memory-v3 not found on PATH' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+            'GIT_DIR_ESCAPED="${GIT_DIR:-}"\n'
+            'GIT_WORK_TREE_ESCAPED="${GIT_WORK_TREE:-}"\n'
+            'if [ -z "$GIT_WORK_TREE_ESCAPED" ]; then\n'
+            '  GIT_WORK_TREE_ESCAPED="$(pwd)"\n'
+            "fi\n"
+            'if [ -z "$GIT_DIR_ESCAPED" ]; then\n'
+            '  GIT_DIR_ESCAPED="$(git rev-parse --git-dir)"\n'
+            "fi\n"
+            'FINGERPRINT=$(git --git-dir "$GIT_DIR_ESCAPED" '
+            '--work-tree "$GIT_WORK_TREE_ESCAPED" rev-parse HEAD)\n'
+            '"$MEMORY_V3_BIN" auto-extract run --trigger git '
+            '--fingerprint "$FINGERPRINT" --git-dir "$GIT_DIR_ESCAPED" '
+            '--work-tree "$GIT_WORK_TREE_ESCAPED"\n'
+        )
+        return
+
+    raise ValueError(f"Unknown auto_action: {args.auto_action}")
 
 
 def cmd_compact(args):
@@ -232,6 +285,7 @@ def cmd_compact(args):
     else:
         text = sys.stdin.read()
     from .server import compact_text
+
     result = compact_text(text=text, max_ratio=args.ratio, verify=not args.no_verify)
     _pp(result)
 
@@ -239,6 +293,7 @@ def cmd_compact(args):
 def cmd_graph_search(args):
     """Search the knowledge graph."""
     from .server import graph_search
+
     result = graph_search(query=args.query, top_k=args.limit)
     _pp(result)
 
@@ -246,6 +301,7 @@ def cmd_graph_search(args):
 def cmd_graph_stats(args):
     """Show knowledge graph statistics."""
     from .server import graph_stats_tool
+
     result = graph_stats_tool()
     _pp(result)
 
@@ -253,6 +309,7 @@ def cmd_graph_stats(args):
 def cmd_decay(args):
     """Run decay sweep."""
     from .server import decay_sweep
+
     result = decay_sweep()
     _pp(result)
 
@@ -260,6 +317,7 @@ def cmd_decay(args):
 def cmd_sync(args):
     """Sync agent changelog."""
     from .server import agent_sync
+
     result = agent_sync(agent_id=args.agent_id)
     _pp(result)
 
@@ -267,15 +325,18 @@ def cmd_sync(args):
 def cmd_conflicts(args):
     """Check for memory conflicts."""
     from .server import check_conflicts
+
     result = check_conflicts()
     _pp(result)
 
 
 # --- NEW v3 commands ---
 
+
 def cmd_consolidate(args):
     """Run sleep consolidation cycle."""
     from .server import sleep_consolidation
+
     result = sleep_consolidation(cycle_type=args.cycle)
     _pp(result)
 
@@ -286,6 +347,7 @@ def cmd_verify(args):
     if args.ids:
         ids = [int(x.strip()) for x in args.ids.split(",")]
     from .server import verify_memories
+
     result = verify_memories(memory_ids=ids, max_check=args.max_check)
     _pp(result)
 
@@ -293,6 +355,7 @@ def cmd_verify(args):
 def cmd_set_layer(args):
     """Change governance layer of a memory."""
     from .server import set_governance_layer
+
     result = set_governance_layer(memory_id=args.id, layer=args.layer)
     _pp(result)
 
@@ -300,6 +363,7 @@ def cmd_set_layer(args):
 def cmd_causal_chain(args):
     """Trace a causal chain."""
     from .server import get_causal_chain
+
     result = get_causal_chain(query=args.query, max_depth=args.depth)
     _pp(result)
 
@@ -307,6 +371,7 @@ def cmd_causal_chain(args):
 def cmd_timeline(args):
     """Get temporal timeline."""
     from .server import get_timeline
+
     result = get_timeline(
         query=args.query,
         start_date=args.start,
@@ -319,6 +384,7 @@ def cmd_timeline(args):
 def cmd_link(args):
     """Link two memories."""
     from .server import link_memories
+
     result = link_memories(
         memory_id_a=args.id_a,
         memory_id_b=args.id_b,
@@ -328,21 +394,28 @@ def cmd_link(args):
 
 
 def cmd_build_kg(args):
-    """Build multi-graph knowledge graph from vault."""
-    from .build_kg import build_knowledge_graph
-    result = build_knowledge_graph(force=args.force, backend=args.backend)
-    _pp(result)
+    """Deprecated graph rebuild command retained for parser compatibility."""
+    _pp(
+        {
+            "error": "memory-v3 build-kg is deprecated and disabled; graph artifacts are dormant",
+            "code": "build_kg_disabled",
+            "status": "disabled",
+        }
+    )
+    sys.exit(1)
 
 
 def cmd_serve(args):
     """Run the MCP server."""
     from .server import run
+
     run()
 
 
 # ---------------------------------------------------------------------------
 # Parser
 # ---------------------------------------------------------------------------
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argument parser with all subcommands."""
@@ -411,8 +484,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--reembed",
         action="store_true",
-        help="Drop and rebuild memory_vec with the current embedding provider",
+        help="Disabled; use the explicit shadow migration/reindex workflow",
     )
+
+    # --- handoffs ---
+    p = sub.add_parser("handoffs", help="List or sweep temporary handoffs")
+    handoff_sub = p.add_subparsers(dest="handoff_action", required=True)
+    handoff_list = handoff_sub.add_parser("list", help="List active handoffs")
+    handoff_list.add_argument("--agent-id", default=None, help="Filter by agent/author")
+    handoff_list.add_argument("--since", default=None, help="Only handoffs updated since ISO time")
+    handoff_sweep = handoff_sub.add_parser("sweep", help="Delete expired handoffs if enabled")
+    handoff_sweep.add_argument("--now", default=None, help="Override current time for sweeping")
 
     # --- integrity ---
     sub.add_parser("integrity", help="Check vault integrity and staleness")
@@ -428,6 +510,43 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--text", default=None, help="Text to compact (or pipe stdin)")
     p.add_argument("--ratio", type=float, default=3.0, help="Max compression ratio")
     p.add_argument("--no-verify", action="store_true", help="Skip verification")
+
+    # --- auto-extract ---
+    p = sub.add_parser("auto-extract", help="Auto-extract memory at session boundaries")
+    auto_sub = p.add_subparsers(dest="auto_action", required=True)
+
+    run = auto_sub.add_parser("run", help="Run auto-extract for a trigger")
+    run.add_argument(
+        "--trigger",
+        required=True,
+        choices=["git", "git-wip", "daily", "vault"],
+        help="Trigger type",
+    )
+    run.add_argument(
+        "--fingerprint",
+        default="auto",
+        help="Run fingerprint (default: auto)",
+    )
+    run.add_argument("--dry-run", action="store_true", help="Collect only; do not extract")
+    run.add_argument("--force", action="store_true", help="Re-run even if already processed")
+    run.add_argument("--text", default=None, help="Override extracted text (used for shell/editor)")
+    run.add_argument("--git-dir", default=None, help="Path to .git directory for git trigger")
+    run.add_argument("--work-tree", default=None, help="Work tree path for git trigger")
+    run.add_argument("--vault-dir", default=None, help="Vault directory")
+    run.add_argument("--since-days", type=int, default=1, help="Days back to scan")
+    run.add_argument("--max-vault-files", type=int, default=50, help="Max md files")
+    run.add_argument(
+        "--max-chars-per-file",
+        type=int,
+        default=40000,
+        help="Max characters to read per markdown file",
+    )
+
+    status = auto_sub.add_parser("status", help="Check auto-extract state for a fingerprint")
+    status.add_argument("--trigger", required=True, choices=["git", "git-wip", "daily", "vault"])
+    status.add_argument("--fingerprint", required=True)
+
+    auto_sub.add_parser("print-git-hook", help="Print a post-commit hook script")
 
     # --- graph ---
     p = sub.add_parser("graph", help="Search knowledge graph")
@@ -450,14 +569,15 @@ def build_parser() -> argparse.ArgumentParser:
     # --- consolidate (NEW) ---
     p = sub.add_parser("consolidate", help="Run sleep consolidation cycle")
     p.add_argument(
-        "--cycle", default="full",
+        "--cycle",
+        default="full",
         choices=["replay", "reorganize", "compress", "prune", "full"],
         help="Cycle type (default: full)",
     )
 
     # --- verify (NEW) ---
     p = sub.add_parser("verify", help="Verify memory source integrity (HaluMem)")
-    p.add_argument("--ids", default=None, help="Comma-separated memory IDs (default: oldest unverified)")
+    p.add_argument("--ids", default=None, help="Comma-separated memory IDs")
     p.add_argument("--max-check", type=int, default=50, help="Max memories to check")
 
     # --- set-layer (NEW) ---
@@ -484,10 +604,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--description", default="", help="Link description")
 
     # --- build-kg ---
-    p = sub.add_parser("build-kg", help="Build multi-graph knowledge graph from vault")
-    p.add_argument("--force", action="store_true", help="Force full rebuild")
-    p.add_argument("--backend", choices=["ollama", "anthropic"], default="ollama",
-                   help="LLM backend: ollama (local) or anthropic (API, fast bulk)")
+    p = sub.add_parser(
+        "build-kg",
+        help="Deprecated disabled graph build command",
+    )
+    p.add_argument("--force", action="store_true", help="Deprecated; ignored")
+    p.add_argument(
+        "--backend",
+        choices=["ollama", "anthropic"],
+        default="ollama",
+        help="Deprecated; ignored. build-kg is disabled",
+    )
 
     # --- serve ---
     sub.add_parser("serve", help="Run the MCP server")
@@ -510,8 +637,10 @@ COMMAND_MAP = {
     "recent": cmd_recent,
     "topics": cmd_topics,
     "reindex": cmd_reindex,
+    "handoffs": cmd_handoffs,
     "integrity": cmd_integrity,
     "extract": cmd_extract,
+    "auto-extract": cmd_auto_extract,
     "compact": cmd_compact,
     "graph": cmd_graph_search,
     "graph-stats": cmd_graph_stats,

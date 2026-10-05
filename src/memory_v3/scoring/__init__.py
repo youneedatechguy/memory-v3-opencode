@@ -17,7 +17,7 @@ rank_results(conn, results, query, context_tags=None, config=None)
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from .actr import (
     activation_noise,
@@ -27,10 +27,9 @@ from .actr import (
     retrieval_probability,
     spreading_activation,
 )
-from .fan_effect import spreading_activation_with_fan
 from .fademem import decay_value, importance_score, should_archive
+from .fan_effect import spreading_activation_with_fan
 from .hierarchy import LAYER_CONFIGS, LayerConfig, get_layer_config
-from .surprise import compute_surprise
 
 __all__ = [
     # actr
@@ -51,18 +50,29 @@ __all__ = [
     # hierarchy
     "get_layer_config",
     "LAYER_CONFIGS",
+    "LayerConfig",
     # pipeline
     "score_memory",
     "rank_results",
 ]
 
 
+def __getattr__(name: str):
+    if name == "compute_surprise":
+        from .surprise import compute_surprise
+
+        return compute_surprise
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 # ---------------------------------------------------------------------------
 # Lightweight config shim -- avoids hard dependency on ..config at import time
 # ---------------------------------------------------------------------------
 
+
 class _DefaultConfig:
     """Fallback configuration when the real config module is unavailable."""
+
     ENABLE_FAN_EFFECT: bool = True
     ENABLE_HALUMEM: bool = True
     FAN_DELTA: float = 0.3
@@ -73,6 +83,7 @@ def _get_config(config=None):
         return config
     try:
         from ..config import get_config
+
         return get_config()
     except (ImportError, AttributeError):
         return _DefaultConfig()
@@ -82,11 +93,12 @@ def _get_config(config=None):
 # Single-memory scoring
 # ---------------------------------------------------------------------------
 
+
 def score_memory(
-    memory: Dict[str, Any],
+    memory: dict[str, Any],
     hybrid_score: float,
-    context_tags: Set[str],
-    tag_fan: Dict[str, int],
+    context_tags: set[str],
+    tag_fan: dict[str, int],
     config=None,
 ) -> tuple[float, float, float]:
     """Compute the unified v3 final score for a memory.
@@ -105,7 +117,9 @@ def score_memory(
     # ACT-R spreading activation (with or without fan penalty)
     if getattr(cfg, "ENABLE_FAN_EFFECT", True):
         S = spreading_activation_with_fan(
-            memory_tags, context_tags, tag_fan,
+            memory_tags,
+            context_tags,
+            tag_fan,
             fan_delta=getattr(cfg, "FAN_DELTA", 0.3),
         )
     else:
@@ -139,13 +153,14 @@ def score_memory(
 # Batch re-ranking
 # ---------------------------------------------------------------------------
 
+
 def rank_results(
     conn,
-    results: List[Dict[str, Any]],
+    results: list[dict[str, Any]],
     query: str,
-    context_tags: Optional[Set[str]] = None,
+    context_tags: set[str] | None = None,
     config=None,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     """Apply the full v3 scoring pipeline to search results and re-rank.
 
     Each result dict is expected to have at least:
@@ -170,9 +185,9 @@ def rank_results(
     # Build tag fan counts across the result set
     tag_counter: Counter = Counter()
     for r in results:
-        for tag in (r.get("tags") or []):
+        for tag in r.get("tags") or []:
             tag_counter[tag] += 1
-    tag_fan: Dict[str, int] = dict(tag_counter)
+    tag_fan: dict[str, int] = dict(tag_counter)
 
     # Score each result
     for r in results:

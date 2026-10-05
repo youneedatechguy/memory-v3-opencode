@@ -15,25 +15,50 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
 
 from ..config import Config, get_config
 from ..db import update_memory
+from ..source_policy import classify_source_path
 
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def _file_hash(path: str) -> Optional[str]:
+def _file_hash(path: str) -> str | None:
     """Compute SHA-256 hash of a file's content. Returns None if file missing."""
     try:
         content = Path(path).read_bytes()
         return hashlib.sha256(content).hexdigest()
-    except (OSError, IOError):
+    except OSError:
         return None
+
+
+def _source_path_for_read(source_file: str, config: Config) -> tuple[Path | None, str | None]:
+    if not config.vault_path:
+        return None, "No vault path configured"
+
+    source = source_file[3:] if source_file.startswith("kg:") else source_file
+    raw_path = Path(source).expanduser()
+    if ".." in raw_path.parts:
+        return None, "Source path is outside approved source policy"
+
+    root = Path(config.vault_path).expanduser().resolve(strict=True)
+    candidate = raw_path if raw_path.is_absolute() else root / raw_path
+    try:
+        candidate.resolve(strict=False).relative_to(root)
+    except ValueError:
+        return None, "Source path is outside approved source policy"
+
+    if not candidate.exists():
+        return None, "Source file no longer exists"
+
+    record = classify_source_path(candidate, config=config)
+    if record is None:
+        return None, "Source path is outside approved source policy"
+    return root / record.relative_path, None
 
 
 def verify_memory(conn: sqlite3.Connection, memory_id: int) -> dict:
@@ -53,7 +78,11 @@ def verify_memory(conn: sqlite3.Connection, memory_id: int) -> dict:
     ).fetchone()
 
     if row is None:
-        return {"memory_id": memory_id, "status": "not_found", "reason": "Memory not found or archived"}
+        return {
+            "memory_id": memory_id,
+            "status": "not_found",
+            "reason": "Memory not found or archived",
+        }
 
     mem = dict(row)
     source_file = mem.get("source_file")
@@ -83,8 +112,22 @@ def verify_memory(conn: sqlite3.Connection, memory_id: int) -> dict:
         conn.commit()
         return result
 
+    cfg = get_config()
+    source_path, reject_reason = _source_path_for_read(source_file, cfg)
+    if source_path is None:
+        new_status = "stale"
+        result["status"] = new_status
+        result["reason"] = reject_reason
+        update_memory(conn, memory_id, verification_status=new_status)
+        conn.execute(
+            "UPDATE memories SET last_verified_at = ? WHERE id = ?",
+            (_now_iso(), memory_id),
+        )
+        conn.commit()
+        return result
+
     # Check if source file exists
-    current_hash = _file_hash(source_file)
+    current_hash = _file_hash(str(source_path))
     if current_hash is None:
         new_status = "stale"
         result["status"] = new_status
@@ -127,7 +170,7 @@ def verify_memory(conn: sqlite3.Connection, memory_id: int) -> dict:
 
 def batch_verify(
     conn: sqlite3.Connection,
-    memory_ids: Optional[list[int]] = None,
+    memory_ids: list[int] | None = None,
     max_check: int = 50,
 ) -> dict:
     """Verify multiple memories.
@@ -187,7 +230,7 @@ def batch_verify(
 
 def decay_confidence(
     conn: sqlite3.Connection,
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> dict:
     """Degrade confidence of unverified memories older than CONFIDENCE_DECAY_DAYS.
 
@@ -241,7 +284,7 @@ def decay_confidence(
 
 def detect_staleness(
     conn: sqlite3.Connection,
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> list[dict]:
     """Find memories whose source files have been modified since indexing.
 
@@ -251,6 +294,7 @@ def detect_staleness(
     Returns list of {memory_id, source_file, stored_hash, current_hash}.
     """
     stale = []
+    cfg = config or get_config()
 
     # Method 1: Check against file_hashes table
     rows = conn.execute(
@@ -292,7 +336,10 @@ def detect_staleness(
         if mid in seen_ids:
             continue
 
-        current_hash = _file_hash(mem["source_file"])
+        source_path, _ = _source_path_for_read(mem["source_file"], cfg)
+        if source_path is None:
+            continue
+        current_hash = _file_hash(str(source_path))
         if current_hash is not None and current_hash != mem["source_hash"]:
             stale.append({
                 "memory_id": mid,

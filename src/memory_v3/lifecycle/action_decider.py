@@ -15,7 +15,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import numpy as np
-import ollama
 
 from ..config import Config, get_config
 from ..db import log_action
@@ -177,6 +176,8 @@ class ActionDecider:
         )
 
         try:
+            import ollama
+
             response = ollama.chat(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],
@@ -252,6 +253,8 @@ class ActionDecider:
         )
 
         try:
+            import ollama
+
             response = ollama.chat(
                 model=model,
                 messages=[{"role": "user", "content": prompt}],

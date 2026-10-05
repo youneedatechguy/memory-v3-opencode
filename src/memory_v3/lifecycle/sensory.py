@@ -29,7 +29,6 @@ from ..config import Config, get_config
 from ..db import add_to_sensory_buffer
 from ..embeddings import embed_with_cache
 from ..security import scan_for_credentials
-from ..scoring.surprise import compute_surprise, assign_cluster, get_centroids
 from ..scoring.actr import cosine_similarity
 
 
@@ -104,22 +103,11 @@ class SensoryFilter:
             result["reason"] = f"Near-duplicate (cosine > {self.cfg.sensory_dedup_threshold})"
             return result
 
-        # Gate 5: Compute surprise score
-        centroid_pairs = get_centroids(self.conn)
-        centroids = [c for _, c in centroid_pairs]
-        surprise = compute_surprise(emb_array, centroids)
-        result["surprise_score"] = surprise
-
-        # Gate 6: Topic assignment
-        if centroid_pairs:
-            cluster_idx = assign_cluster(emb_array, centroids)
-            cluster_ids = [cid for cid, _ in centroid_pairs]
-            if cluster_idx < len(cluster_ids):
-                result["cluster_id"] = cluster_ids[cluster_idx]
-            else:
-                result["cluster_id"] = 0
-        else:
-            result["cluster_id"] = 0
+        # Gates 5-6: centroid-based surprise scoring and topic/cluster
+        # assignment are deterministic no-ops in the graph-free runtime.
+        # No centroid code is imported; neutral surprise and no cluster.
+        surprise = result["surprise_score"]
+        result["cluster_id"] = None
 
         # All gates passed -- insert into sensory buffer
         topic_label = str(result["cluster_id"]) if result["cluster_id"] is not None else None

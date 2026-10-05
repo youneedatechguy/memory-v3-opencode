@@ -4,20 +4,21 @@ Handles v2 -> v3 database migration and graph migration.
 Run via: memory-v3-migrate (pyproject.toml entry point)
 """
 
-import json
 import os
 import pickle
 import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-from .db import _now_iso
+from .db import EMBEDDING_DIM, _now_iso
 
+V4_SCHEMA_VERSION = 4
+V3_SCHEMA_VERSION = 3
 
 # ---------------------------------------------------------------------------
 # v2 Detection
 # ---------------------------------------------------------------------------
+
 
 def detect_v2_db(conn: sqlite3.Connection) -> bool:
     """Check if a database is v2 (has memories table but lacks governance_layer column)."""
@@ -57,6 +58,51 @@ V3_NEW_COLUMNS = [
     ("link_descriptions", "TEXT DEFAULT '{}'"),
     ("source_hash", "TEXT"),
 ]
+
+V4_NEW_COLUMNS = [
+    ("owner", "TEXT"),
+    ("namespace", "TEXT"),
+    ("sensitivity", "TEXT"),
+    ("record_kind", "TEXT"),
+    ("source_id", "TEXT"),
+    ("chunk_id", "TEXT"),
+    ("chunk_index", "INTEGER"),
+    ("chunk_count", "INTEGER"),
+    ("source_updated_at", "TEXT"),
+    ("expiry_at", "TEXT"),
+    ("project_status", "TEXT"),
+    ("project_updated_at", "TEXT"),
+]
+
+V4_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_memories_owner ON memories(owner)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_owner_namespace ON memories(owner, namespace)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_source_id ON memories(source_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_chunk_id ON memories(chunk_id)",
+    "CREATE INDEX IF NOT EXISTS idx_memories_expiry_at ON memories(expiry_at)",
+]
+
+FORBIDDEN_V5_MEMORY_COLUMNS = {
+    "source_generation_id",
+    "source_generation_status",
+    "line_start",
+    "line_end",
+    "heading_path",
+    "rank_weight",
+    "rank_marker",
+    "historical",
+    "deleted_at",
+}
+
+FORBIDDEN_V5_FILE_HASH_COLUMNS = {"source_id", "active_generation_id", "deleted_at"}
+
+FORBIDDEN_V5_TABLES = {
+    "source_generations",
+    "staged_source_chunks",
+    "indexing_checkpoints",
+    "indexing_debt",
+}
 
 # New v3 tables
 V3_NEW_TABLES_SQL = """
@@ -138,6 +184,224 @@ CREATE INDEX IF NOT EXISTS idx_action_log_action ON action_log(action);
 """
 
 
+def _memory_columns(conn: sqlite3.Connection) -> set[str]:
+    return {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
+def _schema_version_table_exists(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
+    ).fetchone()
+    return row is not None
+
+
+def _latest_schema_version(conn: sqlite3.Connection) -> int | None:
+    if not _schema_version_table_exists(conn):
+        return None
+    row = conn.execute("SELECT version FROM schema_version ORDER BY id DESC LIMIT 1").fetchone()
+    return None if row is None else row[0]
+
+
+def _object_names(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'").fetchall()
+    return {row[0] for row in rows}
+
+
+def _all_indexes(conn: sqlite3.Connection) -> set[str]:
+    rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'index'").fetchall()
+    return {row[0] for row in rows if not row[0].startswith("sqlite_")}
+
+
+def _table_sql(conn: sqlite3.Connection, table: str) -> str:
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    return "" if row is None or row[0] is None else row[0].lower()
+
+
+def _required_v3_indexes() -> set[str]:
+    return {
+        "idx_memories_type",
+        "idx_memories_archived",
+        "idx_memories_protected",
+        "idx_memories_source",
+        "idx_memories_created",
+        "idx_memories_activation",
+        "idx_memories_governance",
+        "idx_memories_memory_layer",
+        "idx_memories_cluster",
+        "idx_memories_verification",
+        "idx_sensory_processed",
+        "idx_write_queue_status",
+        "idx_action_log_action",
+    }
+
+
+def _required_v4_indexes() -> set[str]:
+    return _required_v3_indexes() | {_index_name(statement) for statement in V4_INDEXES_SQL}
+
+
+def _index_name(statement: str) -> str:
+    return statement.split(" EXISTS ", 1)[1].split(" ", 1)[0]
+
+
+def _has_complete_v4_shape(conn: sqlite3.Connection) -> bool:
+    objects = _object_names(conn)
+    if FORBIDDEN_V5_TABLES & objects:
+        return False
+    required_tables = {
+        "memories",
+        "memory_fts",
+        "graveyard",
+        "agent_offsets",
+        "file_hashes",
+        "conflicts",
+        "compaction_receipts",
+        "sensory_buffer",
+        "cluster_centroids",
+        "action_log",
+        "consolidation_log",
+        "write_queue",
+        "schema_version",
+        "memory_vec",
+    }
+    required_triggers = {"memories_ai", "memories_ad", "memories_au"}
+    if not required_tables <= objects or not required_triggers <= objects:
+        return False
+    memory_columns = _memory_columns(conn)
+    file_hash_columns = _table_columns(conn, "file_hashes")
+    if FORBIDDEN_V5_MEMORY_COLUMNS & memory_columns:
+        return False
+    if FORBIDDEN_V5_FILE_HASH_COLUMNS & file_hash_columns:
+        return False
+    if not {name for name, _ in V3_NEW_COLUMNS + V4_NEW_COLUMNS} <= memory_columns:
+        return False
+    if not _required_v4_indexes() <= _all_indexes(conn):
+        return False
+    fts_sql = _table_sql(conn, "memory_fts")
+    if "using fts5" not in fts_sql or "content='memories'" not in fts_sql:
+        return False
+    vec_sql = _table_sql(conn, "memory_vec")
+    if "using vec0" not in vec_sql or f"float[{EMBEDDING_DIM}]" not in vec_sql:
+        return False
+    if _latest_schema_version(conn) != V4_SCHEMA_VERSION:
+        return False
+    return conn.execute("PRAGMA user_version").fetchone()[0] == V4_SCHEMA_VERSION
+
+
+def _has_complete_v3_shape(conn: sqlite3.Connection) -> bool:
+    objects = _object_names(conn)
+    if FORBIDDEN_V5_TABLES & objects:
+        return False
+    required_tables = {
+        "memories",
+        "memory_fts",
+        "graveyard",
+        "agent_offsets",
+        "file_hashes",
+        "conflicts",
+        "compaction_receipts",
+        "sensory_buffer",
+        "cluster_centroids",
+        "action_log",
+        "consolidation_log",
+        "write_queue",
+        "schema_version",
+        "memory_vec",
+    }
+    required_triggers = {"memories_ai", "memories_ad", "memories_au"}
+    memory_columns = _memory_columns(conn)
+    file_hash_columns = _table_columns(conn, "file_hashes")
+    if not required_tables <= objects or not required_triggers <= objects:
+        return False
+    if not {name for name, _ in V3_NEW_COLUMNS} <= memory_columns:
+        return False
+    if {name for name, _ in V4_NEW_COLUMNS} & memory_columns:
+        return False
+    if FORBIDDEN_V5_MEMORY_COLUMNS & memory_columns:
+        return False
+    if FORBIDDEN_V5_FILE_HASH_COLUMNS & file_hash_columns:
+        return False
+    if not _required_v3_indexes() <= _all_indexes(conn):
+        return False
+    fts_sql = _table_sql(conn, "memory_fts")
+    if "using fts5" not in fts_sql or "content='memories'" not in fts_sql:
+        return False
+    vec_sql = _table_sql(conn, "memory_vec")
+    if "using vec0" not in vec_sql or f"float[{EMBEDDING_DIM}]" not in vec_sql:
+        return False
+    if _latest_schema_version(conn) != V3_SCHEMA_VERSION:
+        return False
+    return conn.execute("PRAGMA user_version").fetchone()[0] == V3_SCHEMA_VERSION
+
+
+def _exec_sql_script_statements(conn: sqlite3.Connection, sql: str) -> None:
+    for statement in sql.split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+
+
+def _begin(conn: sqlite3.Connection) -> bool:
+    if conn.in_transaction:
+        return False
+    conn.execute("BEGIN")
+    return True
+
+
+def migrate_v3_to_v4(conn: sqlite3.Connection) -> dict:
+    now = _now_iso()
+    stats = {
+        "columns_added": 0,
+        "indexes_created": len(V4_INDEXES_SQL),
+        "migrated_at": now,
+    }
+    try:
+        latest = _latest_schema_version(conn)
+    except sqlite3.DatabaseError:
+        latest = None
+    user_version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if latest and latest > V4_SCHEMA_VERSION or user_version > V4_SCHEMA_VERSION:
+        raise RuntimeError("v5-to-v4 downgrade is not supported")
+    if _has_complete_v4_shape(conn):
+        return stats
+    if not _has_complete_v3_shape(conn):
+        raise RuntimeError("Database is not a complete v3 schema; run explicit migration first")
+
+    started = _begin(conn)
+    try:
+        existing_cols = _memory_columns(conn)
+        for col_name, col_def in V4_NEW_COLUMNS:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+                stats["columns_added"] += 1
+                existing_cols.add(col_name)
+
+        for statement in V4_INDEXES_SQL:
+            conn.execute(statement)
+
+        notes = f"Added metadata columns. {stats['columns_added']} columns added."
+        conn.execute(
+            "INSERT INTO schema_version (version, migrated_at, notes) VALUES (?, ?, ?)",
+            (V4_SCHEMA_VERSION, now, notes),
+        )
+        conn.execute(f"PRAGMA user_version = {V4_SCHEMA_VERSION}")
+        if not _has_complete_v4_shape(conn):
+            raise RuntimeError("v4 migration did not produce a complete schema")
+        if started:
+            conn.commit()
+    except Exception:
+        if started:
+            conn.rollback()
+        raise
+    return stats
+
+
 def migrate_v2_to_v3(conn: sqlite3.Connection) -> dict:
     """
     Migrate a v2 database to v3 in-place.
@@ -163,51 +427,60 @@ def migrate_v2_to_v3(conn: sqlite3.Connection) -> dict:
         "ephemeral_count": 0,
         "migrated_at": now,
     }
+    started = _begin(conn)
+    try:
+        # Step 1: Add new columns
+        existing_cols = _memory_columns(conn)
 
-    # Step 1: Add new columns
-    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(memories)").fetchall()}
+        for col_name, col_def in V3_NEW_COLUMNS:
+            if col_name not in existing_cols:
+                conn.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
+                stats["columns_added"] += 1
+                existing_cols.add(col_name)
 
-    for col_name, col_def in V3_NEW_COLUMNS:
-        if col_name not in existing_cols:
-            conn.execute(f"ALTER TABLE memories ADD COLUMN {col_name} {col_def}")
-            stats["columns_added"] += 1
+        if stats["columns_added"]:
+            # Step 2: Classify into governance layers
+            # Layer 1 - Constitutional: protected memories
+            cursor = conn.execute("UPDATE memories SET governance_layer = 1 WHERE protected = 1")
+            stats["constitutional_count"] = cursor.rowcount
 
-    # Step 2: Classify into governance layers
-    # Layer 1 - Constitutional: protected memories
-    cursor = conn.execute(
-        "UPDATE memories SET governance_layer = 1 WHERE protected = 1"
-    )
-    stats["constitutional_count"] = cursor.rowcount
+            # Layer 2 - Legislative: decisions and corrections (not protected)
+            cursor = conn.execute(
+                "UPDATE memories SET governance_layer = 2 "
+                "WHERE content_type IN ('decision', 'correction') AND protected = 0"
+            )
+            stats["legislative_count"] = cursor.rowcount
 
-    # Layer 2 - Legislative: decisions and corrections (not protected)
-    cursor = conn.execute(
-        "UPDATE memories SET governance_layer = 2 "
-        "WHERE content_type IN ('decision', 'correction') AND protected = 0"
-    )
-    stats["legislative_count"] = cursor.rowcount
+            # Layer 4 - Ephemeral: episodes (not protected)
+            cursor = conn.execute(
+                "UPDATE memories SET governance_layer = 4 "
+                "WHERE content_type = 'episode' AND protected = 0"
+            )
+            stats["ephemeral_count"] = cursor.rowcount
 
-    # Layer 4 - Ephemeral: episodes (not protected)
-    cursor = conn.execute(
-        "UPDATE memories SET governance_layer = 4 "
-        "WHERE content_type = 'episode' AND protected = 0"
-    )
-    stats["ephemeral_count"] = cursor.rowcount
+        # Layer 3 - Factual: everything else (already default)
+        stats["factual_count"] = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE governance_layer = 3"
+        ).fetchone()[0]
 
-    # Layer 3 - Factual: everything else (already default)
-    stats["factual_count"] = conn.execute(
-        "SELECT COUNT(*) FROM memories WHERE governance_layer = 3"
-    ).fetchone()[0]
+        # Step 3: Create new tables and indexes
+        _exec_sql_script_statements(conn, V3_NEW_TABLES_SQL)
 
-    # Step 3: Create new tables and indexes
-    conn.executescript(V3_NEW_TABLES_SQL)
+        latest = _latest_schema_version(conn)
+        if latest is None or latest < V3_SCHEMA_VERSION:
+            notes = f"Migrated from v2. {stats['columns_added']} columns added."
+            conn.execute(
+                "INSERT INTO schema_version (version, migrated_at, notes) VALUES (?, ?, ?)",
+                (V3_SCHEMA_VERSION, now, notes),
+            )
+            conn.execute(f"PRAGMA user_version = {V3_SCHEMA_VERSION}")
 
-    # Step 4: Record schema version
-    conn.execute(
-        "INSERT INTO schema_version (version, migrated_at, notes) VALUES (?, ?, ?)",
-        (3, now, f"Migrated from v2. {stats['columns_added']} columns added.")
-    )
-
-    conn.commit()
+        if started:
+            conn.commit()
+    except Exception:
+        if started:
+            conn.rollback()
+        raise
     return stats
 
 
@@ -222,14 +495,12 @@ EDGE_TYPE_TO_GRAPH = {
     "related_to": "semantic",
     "similar_to": "semantic",
     "concept": "semantic",
-
     # Temporal graph (time-based relationships)
     "temporal": "temporal",
     "follows": "temporal",
     "precedes": "temporal",
     "co_occurred": "temporal",
     "same_session": "temporal",
-
     # Causal graph (cause-effect relationships)
     "causal": "causal",
     "causes": "causal",
@@ -237,7 +508,6 @@ EDGE_TYPE_TO_GRAPH = {
     "depends_on": "causal",
     "enables": "causal",
     "blocks": "causal",
-
     # Structural graph (organizational relationships)
     "structural": "structural",
     "part_of": "structural",
@@ -340,6 +610,7 @@ def migrate_graph_v2_to_v3(
 # CLI entry point
 # ---------------------------------------------------------------------------
 
+
 def main():
     """CLI entry point for memory-v3-migrate."""
     import argparse
@@ -348,24 +619,22 @@ def main():
         description="Migrate memory-v2 database and graphs to v3 format"
     )
     parser.add_argument(
-        "--db", type=str,
-        default=os.environ.get("MEMORY_V2_DB",
-                               str(Path.home() / ".memory-v2" / "memory.db")),
-        help="Path to v2 database (default: ~/.memory-v2/memory.db)"
+        "--db",
+        type=str,
+        default=os.environ.get("MEMORY_V2_DB", str(Path.home() / ".memory-v2" / "memory.db")),
+        help="Path to v2 database (default: ~/.memory-v2/memory.db)",
     )
     parser.add_argument(
-        "--graph", type=str, default=None,
-        help="Path to v2 knowledge graph pickle (optional)"
+        "--graph", type=str, default=None, help="Path to v2 knowledge graph pickle (optional)"
     )
     parser.add_argument(
-        "--output-dir", type=str,
-        default=os.environ.get("MEMORY_V3_GRAPH_DIR",
-                               str(Path.home() / ".memory-v3" / "graphs")),
-        help="Output directory for v3 graph files"
+        "--output-dir",
+        type=str,
+        default=os.environ.get("MEMORY_V3_GRAPH_DIR", str(Path.home() / ".memory-v3" / "graphs")),
+        help="Output directory for v3 graph files",
     )
     parser.add_argument(
-        "--dry-run", action="store_true",
-        help="Check for v2 database without modifying"
+        "--dry-run", action="store_true", help="Check for v2 database without modifying"
     )
 
     args = parser.parse_args()
@@ -378,6 +647,7 @@ def main():
 
     # Load sqlite-vec for the connection
     import sqlite_vec
+
     conn = sqlite3.connect(str(db_path), timeout=10)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
@@ -403,24 +673,37 @@ def main():
     if is_v2:
         print("Migrating database v2 -> v3...")
         stats = migrate_v2_to_v3(conn)
-        print(f"Migration complete:")
+        print("Migration complete:")
         print(f"  Columns added: {stats['columns_added']}")
         print(f"  Constitutional (L1): {stats['constitutional_count']}")
         print(f"  Legislative (L2): {stats['legislative_count']}")
         print(f"  Factual (L3): {stats['factual_count']}")
         print(f"  Ephemeral (L4): {stats['ephemeral_count']}")
     else:
-        # Check if it's already v3
-        try:
-            version = conn.execute(
-                "SELECT version FROM schema_version ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            if version:
-                print(f"Database is already v3 (version {version[0]}). Nothing to do.")
-            else:
+        columns = _memory_columns(conn)
+        missing_v4_columns = "governance_layer" in columns and V4_NEW_COLUMNS[0][0] not in columns
+        if missing_v4_columns:
+            print("Migrating database v3 -> v4...")
+            stats = migrate_v3_to_v4(conn)
+            print("Migration complete:")
+            print(f"  Metadata columns added: {stats['columns_added']}")
+        else:
+            version = _latest_schema_version(conn)
+            if version == V4_SCHEMA_VERSION:
+                print("Database is already migrated (version 4). Nothing to do.")
+                conn.close()
+                return
+            # Check if it's already v3
+            try:
+                version = conn.execute(
+                    "SELECT version FROM schema_version ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                if version:
+                    print(f"Database is already migrated (version {version[0]}). Nothing to do.")
+                else:
+                    print("Database schema not recognized. Manual inspection needed.")
+            except Exception:
                 print("Database schema not recognized. Manual inspection needed.")
-        except Exception:
-            print("Database schema not recognized. Manual inspection needed.")
 
     conn.close()
 
@@ -443,8 +726,7 @@ def main():
         for name, info in graph_stats["graphs_created"].items():
             print(f"  {name}: {info['edges']} edges -> {info['path']}")
         if graph_stats["unmapped_edge_types"]:
-            print(f"  Unmapped types (routed to semantic): "
-                  f"{graph_stats['unmapped_edge_types']}")
+            print(f"  Unmapped types (routed to semantic): {graph_stats['unmapped_edge_types']}")
 
     print("\nDone.")
 

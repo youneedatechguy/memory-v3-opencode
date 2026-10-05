@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
 
 import networkx as nx
 import numpy as np
@@ -44,7 +43,7 @@ def detect_communities(G: nx.DiGraph, resolution: float = 1.0) -> dict:
         import leidenalg
 
         # Convert networkx -> igraph
-        node_list = list(G_undirected.nodes)
+        node_list = sorted(G_undirected.nodes, key=str)
         node_index = {n: i for i, n in enumerate(node_list)}
 
         ig_graph = ig.Graph()
@@ -65,7 +64,7 @@ def detect_communities(G: nx.DiGraph, resolution: float = 1.0) -> dict:
 
         communities = {}
         for comm_id, members in enumerate(partition):
-            communities[comm_id] = [node_list[i] for i in members]
+            communities[comm_id] = sorted((node_list[i] for i in members), key=str)
 
         return {
             "communities": communities,
@@ -82,7 +81,7 @@ def detect_communities(G: nx.DiGraph, resolution: float = 1.0) -> dict:
 
         communities = {}
         for comm_id, members in enumerate(comms):
-            communities[comm_id] = list(members)
+            communities[comm_id] = sorted(members, key=str)
 
         # Compute modularity
         try:
@@ -207,7 +206,14 @@ def get_community_for_query(
     if query_norm < 1e-9:
         return []
 
-    cursor = conn.execute("SELECT community_id, centroid FROM cluster_centroids")
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(cluster_centroids)").fetchall()}
+    if {"community_id", "centroid"} <= columns:
+        cursor = conn.execute("SELECT community_id, centroid FROM cluster_centroids")
+    else:
+        cursor = conn.execute(
+            "SELECT cluster_id AS community_id, centroid_embedding AS centroid "
+            "FROM cluster_centroids"
+        )
     scored = []
 
     for comm_id, centroid_bytes in cursor:

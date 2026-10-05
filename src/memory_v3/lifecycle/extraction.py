@@ -11,23 +11,20 @@ MEMORY_V3_LLM_MODEL env var (default: qwen2.5:3b).
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import sqlite3
 from datetime import datetime, timezone
-from typing import Optional
 
 import numpy as np
 
 from ..config import Config, get_config
-from ..db import add_memory, update_memory, archive_memory, _serialize_f32
+from ..db import _serialize_f32, add_memory, archive_memory, update_memory
 from ..embeddings import embed_with_cache
+from ..providers import get_llm
 from ..scoring.actr import cosine_similarity
 from ..scoring.hierarchy import classify_governance_layer
-from .sensory import SensoryFilter
 from .action_decider import ActionDecider
-from ..providers import get_llm
+from .sensory import SensoryFilter
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -74,16 +71,43 @@ Respond in JSON: {{"action": "UPDATE|DELETE|NONE", "reason": "..."}}"""
 # ---------------------------------------------------------------------------
 
 EMOTION_WORDS = {
-    "happy", "sad", "angry", "frustrated", "excited", "anxious", "worried",
-    "proud", "disappointed", "grateful", "annoyed", "confused", "overwhelmed",
-    "relieved", "nervous", "thrilled", "upset", "stressed", "hopeful",
-    "satisfied", "exhausted", "motivated", "discouraged", "delighted",
-    "furious", "ecstatic", "miserable", "content", "passionate",
+    "happy",
+    "sad",
+    "angry",
+    "frustrated",
+    "excited",
+    "anxious",
+    "worried",
+    "proud",
+    "disappointed",
+    "grateful",
+    "annoyed",
+    "confused",
+    "overwhelmed",
+    "relieved",
+    "nervous",
+    "thrilled",
+    "upset",
+    "stressed",
+    "hopeful",
+    "satisfied",
+    "exhausted",
+    "motivated",
+    "discouraged",
+    "delighted",
+    "furious",
+    "ecstatic",
+    "miserable",
+    "content",
+    "passionate",
 }
 
 EMOTION_PATTERNS = [
     re.compile(r"\bi\s+(?:feel|felt|am feeling|was feeling)\s+\w+", re.IGNORECASE),
-    re.compile(r"\bi(?:'m| am)\s+(?:so\s+)?(?:happy|sad|angry|frustrated|excited|tired|stressed)", re.IGNORECASE),
+    re.compile(
+        r"\bi(?:'m| am)\s+(?:so\s+)?(?:happy|sad|angry|frustrated|excited|tired|stressed)",
+        re.IGNORECASE,
+    ),
     re.compile(r"\bthis\s+(?:makes|made)\s+me\s+(?:feel\s+)?\w+", re.IGNORECASE),
     re.compile(r"\bi\s+(?:love|hate|can't stand|adore)\s+", re.IGNORECASE),
     re.compile(r"[!]{2,}", re.IGNORECASE),
@@ -107,12 +131,18 @@ def detect_content_type(fact: str) -> str:
     fact_lower = fact.lower()
 
     # Check for corrections
-    if any(kw in fact_lower for kw in ["actually", "correction", "not ", "wrong", "corrected", "instead"]):
+    if any(
+        kw in fact_lower
+        for kw in ["actually", "correction", "not ", "wrong", "corrected", "instead"]
+    ):
         if any(kw in fact_lower for kw in ["correction", "corrected", "actually no", "not true"]):
             return "correction"
 
     # Check for decisions
-    if any(kw in fact_lower for kw in ["decided", "decision", "chose", "will use", "going with", "committed to"]):
+    if any(
+        kw in fact_lower
+        for kw in ["decided", "decision", "chose", "will use", "going with", "committed to"]
+    ):
         return "decision"
 
     # Check for identity
@@ -133,11 +163,16 @@ def detect_content_type(fact: str) -> str:
         return "fact"
 
     # Check for preferences
-    if any(kw in fact_lower for kw in ["prefer", "like", "dislike", "favorite", "always", "never", "hate"]):
+    if any(
+        kw in fact_lower
+        for kw in ["prefer", "like", "dislike", "favorite", "always", "never", "hate"]
+    ):
         return "fact"
 
     # Check for plans
-    if any(kw in fact_lower for kw in ["plan", "goal", "want to", "going to", "intend", "deadline"]):
+    if any(
+        kw in fact_lower for kw in ["plan", "goal", "want to", "going to", "intend", "deadline"]
+    ):
         return "fact"
 
     return "fact"
@@ -147,17 +182,16 @@ def detect_content_type(fact: str) -> str:
 # Pass 1: Extract facts
 # ---------------------------------------------------------------------------
 
+
 def extract_facts(
     text: str,
-    date: Optional[str] = None,
-    config: Optional[Config] = None,
+    date: str | None = None,
+    config: Config | None = None,
 ) -> list[str]:
     """Extract discrete facts from text using the local LLM.
 
     Returns a list of fact strings.
     """
-    cfg = config or get_config()
-
     # Inject date context if available
     date_str = date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prompt = EXTRACT_PROMPT.format(text=text)
@@ -191,11 +225,12 @@ def extract_facts(
 # Pass 2: Decide action for each fact
 # ---------------------------------------------------------------------------
 
+
 def decide_action(
     conn: sqlite3.Connection,
     new_fact: str,
     new_embedding: list[float],
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> dict:
     """Decide ADD/UPDATE/DELETE/NONE for a new fact.
 
@@ -221,7 +256,12 @@ def decide_action(
         rows = []
 
     if not rows:
-        return {"action": "ADD", "memory_id": None, "reason": "No similar memories found", "confidence": 0.9}
+        return {
+            "action": "ADD",
+            "memory_id": None,
+            "reason": "No similar memories found",
+            "confidence": 0.9,
+        }
 
     # Build similar memories list with cosine similarities
     similar_memories = []
@@ -242,15 +282,22 @@ def decide_action(
                     dtype=np.float32,
                 )
                 sim = cosine_similarity(emb_array, stored_emb)
-                similar_memories.append({
-                    "id": mem[0] if not isinstance(mem, dict) else mem["id"],
-                    "content": mem[1] if not isinstance(mem, dict) else mem["content"],
-                    "confidence": mem[2] if not isinstance(mem, dict) else mem["confidence"],
-                    "similarity": float(sim),
-                })
+                similar_memories.append(
+                    {
+                        "id": mem[0] if not isinstance(mem, dict) else mem["id"],
+                        "content": mem[1] if not isinstance(mem, dict) else mem["content"],
+                        "confidence": mem[2] if not isinstance(mem, dict) else mem["confidence"],
+                        "similarity": float(sim),
+                    }
+                )
 
     if not similar_memories:
-        return {"action": "ADD", "memory_id": None, "reason": "No active similar memories", "confidence": 0.9}
+        return {
+            "action": "ADD",
+            "memory_id": None,
+            "reason": "No active similar memories",
+            "confidence": 0.9,
+        }
 
     # Use ActionDecider for the decision
     decider = ActionDecider(conn, config=cfg)
@@ -261,13 +308,16 @@ def decide_action(
 # Full pipeline
 # ---------------------------------------------------------------------------
 
+
 def process_conversation(
     conn: sqlite3.Connection,
     text: str,
-    source: Optional[str] = None,
+    source: str | None = None,
     author: str = "claude-code",
-    date: Optional[str] = None,
-    config: Optional[Config] = None,
+    date: str | None = None,
+    config: Config | None = None,
+    add_only: bool = False,
+    memory_metadata: dict | None = None,
 ) -> dict:
     """Full 2-pass extraction pipeline.
 
@@ -309,36 +359,42 @@ def process_conversation(
                 )
                 if not gate_result["accepted"]:
                     stats["skipped"] += 1
-                    stats["details"].append({
-                        "fact": fact[:100],
-                        "action": "SKIPPED",
-                        "reason": gate_result["reason"],
-                    })
+                    stats["details"].append(
+                        {
+                            "fact": fact[:100],
+                            "action": "SKIPPED",
+                            "reason": gate_result["reason"],
+                        }
+                    )
                     continue
 
             # Embed the fact
             embedding = embed_with_cache(fact)
 
             # Pass 2: Decide action
-            decision = decide_action(conn, fact, embedding, config=cfg)
+            if add_only:
+                decision = {
+                    "action": "ADD",
+                    "memory_id": None,
+                    "reason": "add_only",
+                    "confidence": 0.9,
+                }
+            else:
+                decision = decide_action(conn, fact, embedding, config=cfg)
             action = decision["action"]
 
             if action == "ADD":
                 content_type = detect_content_type(fact)
                 tags = _extract_tags(fact)
                 governance_layer = classify_governance_layer(
-                    content_type, protected=False, tags=set(tags),
+                    content_type,
+                    protected=False,
+                    tags=set(tags),
                 )
 
                 surprise = 0.5
-                if cfg.enable_surprise:
-                    from ..scoring.surprise import compute_surprise, get_centroids
-                    centroid_pairs = get_centroids(conn)
-                    centroids = [c for _, c in centroid_pairs]
-                    surprise = compute_surprise(
-                        np.array(embedding, dtype=np.float32), centroids,
-                    )
 
+                metadata = memory_metadata or {}
                 memory_id = add_memory(
                     conn,
                     content=fact,
@@ -349,26 +405,18 @@ def process_conversation(
                     tags=tags,
                     governance_layer=governance_layer,
                     surprise_score=surprise,
+                    **metadata,
                 )
 
-                # Auto-link if zettelkasten enabled
-                if cfg.enable_zettelkasten:
-                    try:
-                        from ..graphs.zettelkasten import auto_link
-                        auto_link(
-                            conn, memory_id, embedding,
-                            threshold=cfg.zettel_link_threshold,
-                        )
-                    except Exception:
-                        pass
-
                 stats["added"] += 1
-                stats["details"].append({
-                    "fact": fact[:100],
-                    "action": "ADD",
-                    "memory_id": memory_id,
-                    "content_type": content_type,
-                })
+                stats["details"].append(
+                    {
+                        "fact": fact[:100],
+                        "action": "ADD",
+                        "memory_id": memory_id,
+                        "content_type": content_type,
+                    }
+                )
 
             elif action == "UPDATE":
                 target_id = decision.get("memory_id")
@@ -382,11 +430,13 @@ def process_conversation(
                     )
                     conn.commit()
                     stats["updated"] += 1
-                    stats["details"].append({
-                        "fact": fact[:100],
-                        "action": "UPDATE",
-                        "memory_id": target_id,
-                    })
+                    stats["details"].append(
+                        {
+                            "fact": fact[:100],
+                            "action": "UPDATE",
+                            "memory_id": target_id,
+                        }
+                    )
                 else:
                     stats["errors"] += 1
 
@@ -395,29 +445,35 @@ def process_conversation(
                 if target_id:
                     archive_memory(conn, target_id, reason="superseded")
                     stats["deleted"] += 1
-                    stats["details"].append({
-                        "fact": fact[:100],
-                        "action": "DELETE",
-                        "memory_id": target_id,
-                    })
+                    stats["details"].append(
+                        {
+                            "fact": fact[:100],
+                            "action": "DELETE",
+                            "memory_id": target_id,
+                        }
+                    )
                 else:
                     stats["errors"] += 1
 
             else:  # NONE
                 stats["skipped"] += 1
-                stats["details"].append({
-                    "fact": fact[:100],
-                    "action": "NONE",
-                    "reason": decision.get("reason", "Too similar"),
-                })
+                stats["details"].append(
+                    {
+                        "fact": fact[:100],
+                        "action": "NONE",
+                        "reason": decision.get("reason", "Too similar"),
+                    }
+                )
 
         except Exception as e:
             stats["errors"] += 1
-            stats["details"].append({
-                "fact": fact[:100] if fact else "?",
-                "action": "ERROR",
-                "reason": str(e),
-            })
+            stats["details"].append(
+                {
+                    "fact": fact[:100] if fact else "?",
+                    "action": "ERROR",
+                    "reason": str(e),
+                }
+            )
 
     return stats
 
