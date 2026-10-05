@@ -220,6 +220,30 @@ def test_old_research_is_excluded_from_manifest_without_historical_mode(tmp_path
     assert all(set(asdict(record)) == record_fields for record in manifest)
 
 
+def test_vendor_directories_are_excluded(tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    write(vault / "business" / "pricing.md")
+    write(vault / "business" / "website" / "src" / "app.js")
+    write(vault / "business" / "website" / "node_modules" / "pkg" / "readme.md")
+    write(vault / "business" / "website" / "dist" / "bundle.js")
+    write(vault / "business" / ".venv" / "lib" / "pkg.py")
+    write(vault / "projects" / "api" / "node_modules" / "x" / "index.js")
+    write(vault / "projects" / "api" / "build" / "out.js")
+    cfg = Config(vault_path=str(vault), source_policy_owner="owner-a")
+
+    manifest = build_source_manifest(config=cfg, today=TODAY)
+    paths = {record.relative_path for record in manifest}
+
+    assert "business/pricing.md" in paths
+    assert "business/website/src/app.js" in paths
+    assert not any(
+        part in Path(p).parts
+        for p in paths
+        for part in ("node_modules", "dist", "build", ".venv", "__pycache__")
+    )
+
+
 def test_source_policy_config_controls_owner_roots_and_stale_threshold(tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()

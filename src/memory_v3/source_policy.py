@@ -14,6 +14,23 @@ TERMINAL_PROJECT_STATUSES = {"completed", "abandoned", "archived", "superseded"}
 INACTIVE_RESEARCH_STATUSES = {"archived", "superseded"}
 TEMP_SUFFIXES = {".log", ".tmp", ".temp", ".bak", ".swp", ".old", ".orig"}
 LOG_DIR_NAMES = {"log", "logs"}
+VENDOR_DIR_NAMES = {
+    "node_modules",
+    "venv",
+    "dist",
+    "build",
+    "__pycache__",
+    "target",
+    "vendor",
+    "coverage",
+    ".svelte-kit",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+}
 HEADER_MAX_LINES = 40
 HEADER_MAX_BYTES = 8192
 
@@ -138,6 +155,7 @@ def _excluded_dir(path: Path, name: str, deny_roots: set[str]) -> bool:
         or name.startswith(".")
         or folded in deny_roots
         or folded in LOG_DIR_NAMES
+        or folded in VENDOR_DIR_NAMES
         or folded == "archive"
         or folded == "lifeos"
         or folded == "shared"
