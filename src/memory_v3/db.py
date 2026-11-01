@@ -946,7 +946,10 @@ def sweep_expired_handoffs(
         ).fetchall()
         memory_ids = [row["id"] for row in rows]
         for memory_id in memory_ids:
-            conn.execute("DELETE FROM memory_vec WHERE id = ?", (memory_id,))
+            try:
+                conn.execute("DELETE FROM memory_vec WHERE id = ?", (memory_id,))
+            except sqlite3.OperationalError:
+                pass
         if memory_ids:
             placeholders = ", ".join("?" for _ in memory_ids)
             conn.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", memory_ids)
@@ -1160,8 +1163,11 @@ def archive_memory(conn: sqlite3.Connection, memory_id: int, reason: str = "deca
     # Mark as archived
     conn.execute("UPDATE memories SET archived = 1 WHERE id = ?", (memory_id,))
 
-    # Remove from vec index
-    conn.execute("DELETE FROM memory_vec WHERE id = ?", (memory_id,))
+    # Remove from vec index (may not be available if vec0 module is not loaded)
+    try:
+        conn.execute("DELETE FROM memory_vec WHERE id = ?", (memory_id,))
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     return True
 

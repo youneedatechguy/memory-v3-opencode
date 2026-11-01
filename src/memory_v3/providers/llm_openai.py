@@ -13,7 +13,7 @@ except ImportError as e:
 
 class OpenAILLM:
     def __init__(self, model: str | None = None):
-        self.model = model or os.environ.get("MEMORY_V3_LLM_MODEL", "gpt-4o-mini")
+        self.model = model or os.environ.get("MEMORY_V3_LLM_MODEL", "gpt-4.1-nano")
         self._client = None
 
     def _get_client(self):

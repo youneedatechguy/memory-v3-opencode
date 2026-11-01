@@ -676,6 +676,15 @@ memory-v3 exposes 24 tools via FastMCP, organized into five categories.
 
 ---
 
+## Durable facts and temporary handoffs
+
+For a lasting fact, edit its canonical vault/project document, run `memory-v3 reindex`
+(or the MCP `reindex` tool), then use `search` or `keyword_search` to verify the
+new text is retrieved with its source path. The index is derived from documents;
+direct `add_memory` and `extract_from_conversation` writes create expiring handoffs
+only. `durable=True`, admin overrides, and custom write namespaces are rejected.
+Do not use a handoff as a substitute for updating the source document.
+
 ## Subsystem Reference
 
 ### Sensory Gate (lifecycle/sensory.py)

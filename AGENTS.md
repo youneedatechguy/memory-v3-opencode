@@ -21,7 +21,7 @@ Direct writes, vault auto-extract, and the handoff sweeper are independently kil
 ## Provider Config Reference
 
 - Embeddings: OpenAI `text-embedding-3-small`, dim=1536
-- LLM: OpenAI `gpt-4o-mini` (fast, cheap, handles extraction/compaction)
+- LLM: OpenAI `gpt-4.1-nano` (fast, cheap, handles extraction/compaction)
 - Agent LLM: Anthropic Claude Sonnet (full reasoning, tool orchestration — handled by OpenCode itself)
 
 ---
@@ -141,7 +141,7 @@ MEMORY_V3_LLM_PROVIDER=ollama|openai|anthropic # default: ollama
 - Schema v4 is the fresh-shadow target. Normal startup rejects incompatible schemas rather than performing an in-place downgrade.
 - Vault indexing builds all chunks and embeddings for a source first, then atomically replaces that source's memories, vectors, FTS rows, and file hash rows in one SQLite transaction.
 - Retrieval is graph-free and uses mandatory owner/source eligibility before lexical/vector ranking.
-- Direct writes are temporary handoffs only. Durable direct memory records and admin override writes are removed.
+- Direct writes support temporary handoffs (30-day TTL) and durable facts (no expiry, namespace=durable) via `durable=True`, plus admin overrides via `admin_override=True`.
 - Graph modules and graph artifacts are dormant. `build-kg` is hard-disabled and `graph-debt` is not a CLI command.
 
 ## Key Config Env Vars
@@ -150,7 +150,7 @@ MEMORY_V3_LLM_PROVIDER=ollama|openai|anthropic # default: ollama
 MEMORY_V3_DB          Path to SQLite DB (default: ~/.memory-v3/memory.db)
 MEMORY_V3_VAULT       Markdown vault directory
 MEMORY_V3_EMBED_MODEL Embedding model name (default: nomic-embed-text)
-MEMORY_V3_LLM_MODEL   LLM model name (default: qwen2.5:3b)
+MEMORY_V3_LLM_MODEL   LLM model name (default: gpt-4.1-nano)
 MEMORY_V3_EMBED_DIM   Embedding dimensions (default: 768)
 MEMORY_V3_INDEXING_ENABLED              Enable vault indexing/reindex
 MEMORY_V3_VAULT_AUTO_EXTRACT_ENABLED   Enable policy-controlled vault auto-extract
@@ -184,7 +184,7 @@ OpenCode v1.14+ format — key differences from older docs: top-level key is `mc
         "MEMORY_V3_LLM_PROVIDER": "openai",
         "MEMORY_V3_EMBED_MODEL": "text-embedding-3-small",
         "MEMORY_V3_EMBED_DIM": "1536",
-        "MEMORY_V3_LLM_MODEL": "gpt-4o-mini"
+        "MEMORY_V3_LLM_MODEL": "gpt-4.1-nano"
       }
     }
   }

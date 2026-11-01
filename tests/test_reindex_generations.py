@@ -160,6 +160,34 @@ def test_changed_source_replaces_old_memory_vector_fts_and_hash(monkeypatch, tmp
     )
 
 
+def test_edited_infrastructure_document_reindexes_and_cites_current_source(monkeypatch, tmp_path):
+    import memory_v3.server as server
+
+    vault = tmp_path / "vault"
+    path = vault / "infrastructure/hosts.md"
+    write(path, "# Hosts\n\nSteam PC oldmethod\n")
+    configure(monkeypatch, tmp_path, vault)
+    monkeypatch.setattr(server, "get_embedder", lambda: CountingEmbedder())
+    assert json.loads(server.reindex())["indexed"] == 1
+
+    updated = "# Hosts\n\nSteam PC\n" + ("Background detail.\n" * 28) + "scheduledtaskmethod\n"
+    write(path, updated)
+    result = json.loads(server.reindex())
+    matches = json.loads(server.keyword_search("scheduledtaskmethod"))
+
+    assert result["indexed"] == 1
+    assert result["errors"] == 0
+    assert source_snapshot(server._conn, "infrastructure/hosts.md")["hash"] == hashlib.sha256(
+        updated.encode()
+    ).hexdigest()
+    assert matches["count"] == 1
+    assert matches["results"][0]["source_file"] == "infrastructure/hosts.md"
+    assert "Source: infrastructure/hosts.md" in matches["results"][0]["content"]
+    assert "scheduledtaskmethod" in matches["results"][0]["content"]
+    assert len(matches["results"][0]["content"]) > 300
+    assert json.loads(server.keyword_search("oldmethod"))["count"] == 0
+
+
 def test_embedding_failure_and_malformed_vectors_preserve_old_state_and_hash(monkeypatch, tmp_path):
     import memory_v3.server as server
 

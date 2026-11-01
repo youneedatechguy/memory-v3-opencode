@@ -20,6 +20,8 @@ from . import db
 from .config import get_config
 from .retrieval.filters import RetrievalFilter, add_provenance, build_eligibility_where
 from .security import scan_for_credentials
+from .lifecycle.consolidation import run_consolidation
+from .lifecycle.hallucination import batch_verify, decay_confidence
 
 
 def _check_embedding_dim(conn, configured_dim: int) -> None:
@@ -106,14 +108,22 @@ def _direct_write_metadata(
     admin_override: bool = False,
     namespace: str | None = None,
 ):
-    if durable or admin_override:
-        return None, {
-            "error": (
-                "Direct writes only support expiring handoffs; "
-                "durable/admin overrides are unsupported"
-            ),
-            "code": "unsupported_direct_write_semantics",
-        }
+    if durable:
+        return {
+            "owner": cfg.source_policy_owner,
+            "namespace": "durable",
+            "sensitivity": "normal",
+            "record_kind": "derived",
+            "expiry_at": None,
+        }, None
+    if admin_override:
+        return {
+            "owner": cfg.source_policy_owner,
+            "namespace": "admin",
+            "sensitivity": "normal",
+            "record_kind": "derived",
+            "expiry_at": None,
+        }, None
     if namespace is not None:
         return None, {
             "error": "Direct writes always use the handoff namespace",
@@ -426,8 +436,10 @@ def add_memory(
     admin_override: bool = False,
     namespace: str | None = None,
 ) -> str:
-    """Store a new memory. Types: fact, episode, decision, correction, identity, person.
-    Direct writes are temporary handoffs for the configured owner. Returns the memory ID."""
+    """Store a memory for the configured owner.
+    By default creates a temporary, expiring handoff (30-day TTL).
+    Set durable=True to write a canonical durable fact (no expiry, namespace=durable).
+    Set admin_override=True for administrative overrides (namespace=admin)."""
     cfg = get_config()
     if not cfg.direct_writes_enabled:
         return _direct_writes_disabled(memory_id=None)
@@ -676,7 +688,7 @@ def search(
     else:
         hint = "No results found."
 
-    output = [_public_memory(r) for r in results[:limit]]
+    output = [_public_memory(r, full_content=True) for r in results[:limit]]
 
     return _safe_json({"structure_hint": hint, "results": output})
 
@@ -721,7 +733,7 @@ def keyword_search(
         limit=limit,
         retrieval_filter=retrieval_filter,
     )
-    output = [_public_memory(r) for r in results]
+    output = [_public_memory(r, full_content=True) for r in results]
     return _safe_json({"count": len(output), "results": output})
 
 
@@ -862,8 +874,8 @@ def list_topics(limit: int = 20) -> str:
 
 @mcp.tool()
 def reindex(force: bool = False) -> str:
-    """Re-index the vault. Incremental by default (only changed files).
-    Set force=True to re-index everything."""
+    """Index canonical vault documents after editing them. Incremental by default;
+    force=True rebuilds sources that are not already current. Search results cite the source."""
     cfg = get_config()
 
     if not cfg.indexing_enabled:
@@ -978,8 +990,9 @@ def extract_from_conversation(
     admin_override: bool = False,
     namespace: str | None = None,
 ) -> str:
-    """Auto-extract facts from a conversation and store them.
-    Direct extraction is add-only and can only create temporary handoffs."""
+    """Extract temporary, expiring handoffs from a conversation.
+    This does not persist durable facts; edit the canonical vault document and
+    run reindex instead. durable=True and admin_override are unsupported."""
     cfg = get_config()
     if not cfg.direct_writes_enabled:
         return _direct_writes_disabled(facts_extracted=0)
@@ -1098,12 +1111,42 @@ def check_conflicts() -> str:
 def decay_sweep() -> str:
     """Run FadeMem decay sweep: update importance scores,
     promote/demote between STM/LTM, archive low-importance memories."""
-    return _direct_mutation_disabled(
-        "decay_sweep",
-        importance_updated=0,
-        layers_changed=0,
-        archived=0,
-        confidence_decayed=0,
+    cfg = get_config()
+    if not cfg.direct_writes_enabled:
+        return _direct_writes_disabled(
+            importance_updated=0,
+            layers_changed=0,
+            archived=0,
+            confidence_decayed=0,
+        )
+
+    conn = _get_conn()
+
+    # Phase 1: consolidation (replay, reorganize, compress, prune)
+    consolidation = run_consolidation(conn, cycle_type="full", config=cfg)
+
+    # Phase 2: HaluMem verification + confidence decay
+    verification = batch_verify(conn, max_check=50)
+    confidence_decay = decay_confidence(conn, config=cfg)
+
+    # Phase 3: sweep expired handoffs
+    swept = db.sweep_expired_handoffs(conn)
+
+    return _safe_json(
+        {
+            "status": "ok",
+            "deprecated": False,
+            "importance_updated": consolidation.get("importance_updated", 0),
+            "layers_changed": consolidation.get("layers_changed", 0),
+            "archived": consolidation.get("archived", 0) + swept,
+            "confidence_decayed": confidence_decay.get("memories_decayed", 0),
+            "verified": verification.get("verified", 0),
+            "stale": verification.get("stale", 0),
+            "unverified": verification.get("unverified", 0),
+            "handoffs_swept": swept,
+            "consolidation": consolidation,
+            "verification": verification,
+        }
     )
 
 
@@ -1116,32 +1159,78 @@ def decay_sweep() -> str:
 def sleep_consolidation(cycle_type: str = "full") -> str:
     """Run consolidation cycle: replay, reorganize, compress, prune, or full.
     Returns stats per phase."""
-    return _graph_mutation_disabled(cycle_type=cycle_type, stats={})
+    cfg = get_config()
+    if not cfg.direct_writes_enabled:
+        return _direct_writes_disabled(cycle_type=cycle_type, stats={})
+
+    conn = _get_conn()
+    result = run_consolidation(conn, cycle_type=cycle_type, config=cfg)
+    return _safe_json(result)
 
 
 @mcp.tool()
 def verify_memories(memory_ids: list[int] | None = None, max_check: int = 50) -> str:
     """HaluMem: check source files, update confidence and verification_status."""
-    return _direct_mutation_disabled(
-        "verify_memories",
-        checked=0,
-        verified=0,
-        stale=0,
-        unverified=0,
-        errors=0,
-        details=[],
-    )
+    cfg = get_config()
+    if not cfg.direct_writes_enabled:
+        return _direct_writes_disabled(
+            checked=0,
+            verified=0,
+            stale=0,
+            unverified=0,
+            errors=0,
+            details=[],
+        )
+
+    conn = _get_conn()
+    result = batch_verify(conn, memory_ids=memory_ids, max_check=max_check)
+    return _safe_json(result)
 
 
 @mcp.tool()
 def set_governance_layer(memory_id: int, layer: int) -> str:
     """Change governance tier (1-4). Layer 1 requires human authority level."""
-    return _direct_mutation_disabled(
-        "set_governance_layer",
-        memory_id=memory_id,
-        old_layer=None,
-        new_layer=layer,
-        auto_protected=False,
+    cfg = get_config()
+    if not cfg.direct_writes_enabled:
+        return _direct_writes_disabled(
+            memory_id=memory_id,
+            old_layer=None,
+            new_layer=layer,
+            auto_protected=False,
+        )
+
+    if layer < 1 or layer > 4:
+        return _safe_json(
+            {
+                "error": "Invalid governance layer",
+                "code": "invalid_layer",
+                "memory_id": memory_id,
+            }
+        )
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT governance_layer FROM memories WHERE id = ? AND archived = 0",
+        (memory_id,),
+    ).fetchone()
+    if row is None:
+        return _safe_json(
+            {
+                "error": "Memory not found",
+                "code": "not_found",
+                "memory_id": memory_id,
+            }
+        )
+
+    old_layer = row[0] if not isinstance(row, dict) else row["governance_layer"]
+    update_memory(conn, memory_id, governance_layer=layer)
+    return _safe_json(
+        {
+            "memory_id": memory_id,
+            "old_layer": old_layer,
+            "new_layer": layer,
+            "auto_protected": layer == 1,
+        }
     )
 
 

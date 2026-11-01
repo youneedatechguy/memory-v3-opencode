@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 
 import pytest
 
@@ -129,13 +130,10 @@ def test_direct_add_bypasses_async_queue_and_does_not_drain_pending_entries(
 @pytest.mark.parametrize(
     "kwargs",
     [
-        {"durable": True},
-        {"admin_override": True},
-        {"durable": True, "admin_override": True},
         {"namespace": "business"},
     ],
 )
-def test_direct_add_rejects_admin_or_durable_semantics_before_side_effects(monkeypatch, kwargs):
+def test_direct_add_rejects_custom_namespace_before_side_effects(monkeypatch, kwargs):
     monkeypatch.setenv("MEMORY_V3_DIRECT_WRITES_ENABLED", "true")
     reset_config()
     import memory_v3.server as server
@@ -157,26 +155,61 @@ def test_direct_add_rejects_admin_or_durable_semantics_before_side_effects(monke
     assert calls == []
 
 
-def test_direct_extract_rejects_admin_or_durable_semantics_before_side_effects(monkeypatch):
+def test_direct_add_accepts_durable_and_admin_override(monkeypatch):
+    """durable=True and admin_override=True now pass the direct-write gate."""
+    monkeypatch.setenv("MEMORY_V3_DIRECT_WRITES_ENABLED", "true")
+    reset_config()
+    import memory_v3.server as server
+
+    for kwargs in [{"durable": True}, {"admin_override": True}, {"durable": True, "admin_override": True}]:
+        calls = []
+
+        def fake_get_conn():
+            calls.append("get_conn")
+            return object()
+
+        class FakeEmbedder:
+            def embed(self, text):
+                calls.append("embed")
+                return [0.0] * 1536
+
+        monkeypatch.setattr(server, "_get_conn", fake_get_conn)
+        monkeypatch.setattr(server, "get_embedder", lambda: FakeEmbedder())
+        monkeypatch.setattr(server.db, "add_memory", lambda *a, **k: calls.append("add_memory") or 999)
+
+        result = json.loads(server.add_memory("test fact", **kwargs))
+
+        # durable/admin_override pass the metadata gate (not rejected)
+        assert result.get("code") != "unsupported_direct_write_semantics"
+        assert "get_conn" in calls  # gate was passed
+
+
+def test_direct_extract_accepts_durable_past_gate(monkeypatch):
+    """durable=True now passes the direct-write gate in extract_from_conversation."""
     monkeypatch.setenv("MEMORY_V3_DIRECT_WRITES_ENABLED", "true")
     reset_config()
     import memory_v3.server as server
 
     calls = []
 
-    def fail(*args, **kwargs):
-        calls.append((args, kwargs))
-        raise AssertionError("direct semantics gate must run before providers and DB")
+    def fake_get_conn():
+        calls.append("get_conn")
+        return object()
 
-    monkeypatch.setattr(server, "_get_conn", fail)
-    monkeypatch.setattr(server, "get_embedder", fail)
-    monkeypatch.setattr(server.db, "add_memory", fail)
+    class FakeEmbedder:
+        def embed(self, text):
+            calls.append("embed")
+            return [0.0] * 1536
 
-    result = json.loads(server.extract_from_conversation("blocked", durable=True))
+    monkeypatch.setattr(server, "_get_conn", fake_get_conn)
+    monkeypatch.setattr(server, "get_embedder", lambda: FakeEmbedder())
+    monkeypatch.setattr(server.db, "add_memory", lambda *a, **k: calls.append("add_memory") or 1)
 
-    assert result["code"] == "unsupported_direct_write_semantics"
-    assert result["facts_extracted"] == 0
-    assert calls == []
+    result = json.loads(server.extract_from_conversation("test", durable=True))
+
+    # durable passes the metadata gate (not rejected)
+    assert result.get("code") != "unsupported_direct_write_semantics"
+    assert "get_conn" in calls  # gate was passed
 
 
 @pytest.mark.parametrize(
@@ -185,9 +218,6 @@ def test_direct_extract_rejects_admin_or_durable_semantics_before_side_effects(m
         ("update", lambda server: server.update(1, content="new")),
         ("forget", lambda server: server.forget(1, reason="test")),
         ("compact_text", lambda server: server.compact_text("text")),
-        ("decay_sweep", lambda server: server.decay_sweep()),
-        ("verify_memories", lambda server: server.verify_memories([1])),
-        ("set_governance_layer", lambda server: server.set_governance_layer(1, 4)),
     ],
 )
 def test_legacy_direct_mutation_tools_are_stable_stubs_before_side_effects(
@@ -231,7 +261,7 @@ def test_direct_extract_is_handoff_add_only_without_graph_behavior(
     reset_config()
     existing = _add(db_conn, mock_embedding, "existing handoff")
     import memory_v3.graphs.zettelkasten as zettelkasten
-    import memory_v3.lifecycle.extraction as extraction
+    extraction = import_module("memory_v3.lifecycle.extraction")
     import memory_v3.server as server
 
     class StubLLM:
